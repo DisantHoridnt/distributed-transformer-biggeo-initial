@@ -134,7 +134,7 @@ version = "53.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e4a9b9b1d6d7117f6138e13bc4dd5daa7f94e671b70e8c9c4dc37b4f5ecfc16"
 dependencies = [
- "bytes",
+ "bytes 1.9.0",
  "half",
  "num",
 ]
@@ -400,6 +400,16 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "206fdffcfa2df7cbe15601ef46c813fce0965eb3286db6b56c583b814b51c81c"
+dependencies = [
+ "byteorder",
+ "iovec",
+]
+
+[[package]]
+name = "bytes"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "325918d6fe32f23b19878fe4b34794ae41fc19ddbe53b10571a4874d44ffd39b"
@@ -560,12 +570,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",
- "bytes",
+ "async-trait",
+ "bytes 1.9.0",
  "dotenv",
- "futures",
+ "futures 0.3.31",
+ "futures-util",
  "object_store",
  "parquet",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -620,6 +633,12 @@ checksum = "e13624c2627564efccf4934284bdd98cbaa14e79b0b5a141218e507b3a823456"
 dependencies = [
  "percent-encoding",
 ]
+
+[[package]]
+name = "futures"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a471a38ef8ed83cd6e40aa59c1ffe17db6855c18e3604d9c4ed8c08ebc28678"
 
 [[package]]
 name = "futures"
@@ -698,6 +717,7 @@ version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9fa08315bb612088cc391249efdc3bc77536f16c91f6cf495e6fbe85b20a4a81"
 dependencies = [
+ "futures 0.1.31",
  "futures-channel",
  "futures-core",
  "futures-io",
@@ -708,6 +728,7 @@ dependencies = [
  "pin-project-lite",
  "pin-utils",
  "slab",
+ "tokio-io",
 ]
 
 [[package]]
@@ -746,7 +767,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccae279728d634d083c00f6099cb58f01cc99c145b84b8be2f6c74618d79922e"
 dependencies = [
  "atomic-waker",
- "bytes",
+ "bytes 1.9.0",
  "fnv",
  "futures-core",
  "futures-sink",
@@ -787,7 +808,7 @@ version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21b9ddb458710bc376481b842f5da65cdf31522de232c1ca8146abce2a358258"
 dependencies = [
- "bytes",
+ "bytes 1.9.0",
  "fnv",
  "itoa",
 ]
@@ -798,7 +819,7 @@ version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1efedce1fb8e6913f23e0c92de8e62cd5b772a67e7b3946df930a62566c93184"
 dependencies = [
- "bytes",
+ "bytes 1.9.0",
  "http",
 ]
 
@@ -808,7 +829,7 @@ version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "793429d76616a256bcb62c2a2ec2bed781c8307e797e2598c50010f2bee2544f"
 dependencies = [
- "bytes",
+ "bytes 1.9.0",
  "futures-util",
  "http",
  "http-body",
@@ -833,7 +854,7 @@ version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97818827ef4f364230e16705d4706e2897df2bb60617d6ca15d598025a3c481f"
 dependencies = [
- "bytes",
+ "bytes 1.9.0",
  "futures-channel",
  "futures-util",
  "h2",
@@ -871,7 +892,7 @@ version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df2dcfbe0677734ab2f3ffa7fa7bfd4706bfdc1ef393f2ee30184aed67e631b4"
 dependencies = [
- "bytes",
+ "bytes 1.9.0",
  "futures-channel",
  "futures-util",
  "http",
@@ -1061,6 +1082,15 @@ name = "integer-encoding"
 version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
+
+[[package]]
+name = "iovec"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2b3ea6ff95e175473f8ffe6a7eb7c00d054240321b84c57051175fe3c1e075e"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "ipnet"
@@ -1348,9 +1378,9 @@ checksum = "6eb4c22c6154a1e759d7099f9ffad7cc5ef8245f9efbab4a41b92623079c82f3"
 dependencies = [
  "async-trait",
  "base64",
- "bytes",
+ "bytes 1.9.0",
  "chrono",
- "futures",
+ "futures 0.3.31",
  "humantime",
  "hyper",
  "itertools",
@@ -1430,9 +1460,10 @@ dependencies = [
  "arrow-select",
  "base64",
  "brotli",
- "bytes",
+ "bytes 1.9.0",
  "chrono",
  "flate2",
+ "futures 0.3.31",
  "half",
  "hashbrown",
  "lz4_flex",
@@ -1442,6 +1473,7 @@ dependencies = [
  "seq-macro",
  "snap",
  "thrift",
+ "tokio",
  "twox-hash",
  "zstd",
  "zstd-sys",
@@ -1511,7 +1543,7 @@ version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62e96808277ec6f97351a2380e6c25114bc9e67037775464979f3037c92d05ef"
 dependencies = [
- "bytes",
+ "bytes 1.9.0",
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
@@ -1529,7 +1561,7 @@ version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2fe5ef3495d7d2e377ff17b1a8ce2ee2ec2a18cde8b6ad6619d65d0701c135d"
 dependencies = [
- "bytes",
+ "bytes 1.9.0",
  "getrandom",
  "rand",
  "ring",
@@ -1641,7 +1673,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a77c62af46e79de0a562e1a9849205ffcb7fc1238876e9bd743357570e04046f"
 dependencies = [
  "base64",
- "bytes",
+ "bytes 1.9.0",
  "futures-core",
  "futures-util",
  "h2",
@@ -2098,7 +2130,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5cec9b21b0450273377fc97bd4c33a8acffc8c996c987a7c5b319a0083707551"
 dependencies = [
  "backtrace",
- "bytes",
+ "bytes 1.9.0",
  "libc",
  "mio",
  "parking_lot",
@@ -2107,6 +2139,17 @@ dependencies = [
  "socket2",
  "tokio-macros",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "tokio-io"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57fc868aae093479e3131e3d165c93b1c7474109d13c90ec0dda2a1bbfff0674"
+dependencies = [
+ "bytes 0.4.12",
+ "futures 0.1.31",
+ "log",
 ]
 
 [[package]]
@@ -2137,7 +2180,7 @@ version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61e7c3654c13bcd040d4a03abee2c75b1d14a37b423cf5a813ceae1cc903ec6a"
 dependencies = [
- "bytes",
+ "bytes 1.9.0",
  "futures-core",
  "futures-sink",
  "pin-project-lite",

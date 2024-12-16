@@ -1,6 +1,6 @@
 /target
 
-cargo.lock
+Cargo.lock
 
 # Cargo cache
 /.cargo
