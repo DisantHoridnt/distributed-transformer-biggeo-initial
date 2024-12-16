@@ -13,7 +13,8 @@ use parquet::file::metadata::ParquetMetaData;
 use std::ops::Range;
 use futures::future::BoxFuture;
 use parquet::errors::ParquetError;
-use parquet::file::reader::{ChunkReader, Length};
+use parquet::file::reader::{ChunkReader, Length, FileReader};
+use parquet::file::serialized_reader::SerializedFileReader;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
 struct BytesReader {
@@ -82,8 +83,10 @@ impl ChunkReader for SyncReader {
         Ok(self.data.slice(range))
     }
 
-    fn get_read(&mut self) -> &mut Self::T {
-        self
+    fn get_read(&self, start: u64) -> Result<Self::T, ParquetError> {
+        let mut reader = SyncReader::new(self.data.clone());
+        reader.seek(SeekFrom::Start(start))?;
+        Ok(reader)
     }
 }
 
@@ -99,10 +102,9 @@ impl AsyncFileReader for BytesReader {
         let data = self.data.clone();
         Box::pin(async move {
             let reader = SyncReader::new(data);
-            let metadata = parquet::file::reader::SerializedFileReader::new(reader)?
-                .metadata()
-                .clone();
-            Ok(Arc::new(metadata))
+            let file_reader = SerializedFileReader::new(reader)?;
+            let metadata = file_reader.metadata();
+            Ok(Arc::new(metadata.clone()))
         })
     }
 }
