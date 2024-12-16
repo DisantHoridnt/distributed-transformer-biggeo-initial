@@ -7,3 +7,8 @@ cargo.lock
 
 # Build artifacts
 /target
+
+# Environment variables
+.env
+.env.local
+.env.*
