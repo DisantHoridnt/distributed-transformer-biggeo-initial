@@ -133,30 +133,46 @@ async fn main() -> Result<()> {
 
     // Initialize S3 connection using environment variables
     let s3 = AmazonS3Builder::new()
+        .with_access_key_id(env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID must be set"))
+        .with_secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").expect("AWS_SECRET_ACCESS_KEY must be set"))
         .with_region(env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string()))
         .with_bucket_name(env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set"))
         .build()?;
 
-    // Read Parquet file from S3
-    let path: Path = "input_data.parquet".into();
-    let data: Bytes = s3.get(&path).await?.bytes().await?;
+    // List contents of the bucket
+    println!("Listing contents of bucket {}:", env::var("S3_BUCKET_NAME").unwrap());
+    let mut list_stream = s3.list(None);
 
-    // Create async reader
-    let async_reader = BytesReader::new(data);
-    let stream = ParquetRecordBatchStreamBuilder::new(async_reader)
-        .await?
-        .build()?;
-
-    // Process record batches asynchronously
-    let mut batch_count = 0;
-    let mut batches = Vec::new();
-    tokio::pin!(stream);
-    while let Some(batch) = stream.try_next().await? {
-        batch_count += 1;
-        batches.push(batch);
+    while let Some(meta) = list_stream.try_next().await? {
+        println!("Found object: {}", meta.location);
     }
 
-    println!("Successfully read {} record batches", batch_count);
+    // Try to read the Parquet file
+    let path: Path = "input_data.parquet".into();
+    match s3.get(&path).await {
+        Ok(data) => {
+            let bytes = data.bytes().await?;
+            // Create async reader
+            let async_reader = BytesReader::new(bytes);
+            let stream = ParquetRecordBatchStreamBuilder::new(async_reader)
+                .await?
+                .build()?;
+
+            // Process record batches asynchronously
+            let mut batch_count = 0;
+            let mut batches = Vec::new();
+            tokio::pin!(stream);
+            while let Some(batch) = stream.try_next().await? {
+                batch_count += 1;
+                batches.push(batch);
+            }
+
+            println!("Successfully read {} record batches", batch_count);
+        }
+        Err(e) => {
+            println!("Error reading Parquet file: {}", e);
+        }
+    }
 
     Ok(())
 }
