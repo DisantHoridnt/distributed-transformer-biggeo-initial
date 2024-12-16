@@ -13,6 +13,8 @@ use parquet::file::metadata::ParquetMetaData;
 use std::ops::Range;
 use futures::future::BoxFuture;
 use parquet::errors::ParquetError;
+use parquet::file::reader::{ChunkReader, Length};
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
 struct BytesReader {
     data: Bytes,
@@ -21,6 +23,67 @@ struct BytesReader {
 impl BytesReader {
     fn new(data: Bytes) -> Self {
         Self { data }
+    }
+}
+
+struct SyncReader {
+    data: Bytes,
+    pos: usize,
+}
+
+impl SyncReader {
+    fn new(data: Bytes) -> Self {
+        Self { data, pos: 0 }
+    }
+}
+
+impl Length for SyncReader {
+    fn len(&self) -> u64 {
+        self.data.len() as u64
+    }
+}
+
+impl Read for SyncReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let available = self.data.len() - self.pos;
+        let amount = buf.len().min(available);
+        if amount > 0 {
+            buf[..amount].copy_from_slice(&self.data[self.pos..self.pos + amount]);
+            self.pos += amount;
+        }
+        Ok(amount)
+    }
+}
+
+impl Seek for SyncReader {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let new_pos = match pos {
+            SeekFrom::Start(offset) => offset as i64,
+            SeekFrom::End(offset) => self.data.len() as i64 + offset,
+            SeekFrom::Current(offset) => self.pos as i64 + offset,
+        };
+
+        if new_pos < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Seek before start of file",
+            ));
+        }
+
+        self.pos = new_pos as usize;
+        Ok(self.pos as u64)
+    }
+}
+
+impl ChunkReader for SyncReader {
+    type T = Self;
+
+    fn get_bytes(&self, range: Range<usize>) -> Result<Bytes, ParquetError> {
+        Ok(self.data.slice(range))
+    }
+
+    fn get_read(&mut self) -> &mut Self::T {
+        self
     }
 }
 
@@ -33,11 +96,12 @@ impl AsyncFileReader for BytesReader {
     }
 
     fn get_metadata(&mut self) -> BoxFuture<'_, Result<Arc<ParquetMetaData>, ParquetError>> {
+        let data = self.data.clone();
         Box::pin(async move {
-            let mut arrow_file = parquet::arrow::async_reader::AsyncFile::new(
-                futures::io::Cursor::new(self.data.clone())
-            );
-            let metadata = arrow_file.metadata().await?;
+            let reader = SyncReader::new(data);
+            let metadata = parquet::file::reader::SerializedFileReader::new(reader)?
+                .metadata()
+                .clone();
             Ok(Arc::new(metadata))
         })
     }
