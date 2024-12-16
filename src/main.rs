@@ -79,8 +79,19 @@ impl Seek for SyncReader {
 impl ChunkReader for SyncReader {
     type T = Self;
 
-    fn get_bytes(&self, range: Range<usize>) -> Result<Bytes, ParquetError> {
-        Ok(self.data.slice(range))
+    fn get_bytes(&self, start: u64, length: usize) -> Result<Bytes, ParquetError> {
+        let start = start as usize;
+        let end = start.checked_add(length).ok_or_else(|| {
+            ParquetError::General("Integer overflow when calculating end index".to_string())
+        })?;
+
+        if end > self.data.len() {
+            return Err(ParquetError::EOF(
+                "Requested range extends beyond data length".to_string(),
+            ));
+        }
+
+        Ok(self.data.slice(start..end))
     }
 
     fn get_read(&self, start: u64) -> Result<Self::T, ParquetError> {
@@ -93,8 +104,12 @@ impl ChunkReader for SyncReader {
 #[async_trait]
 impl AsyncFileReader for BytesReader {
     fn get_bytes(&mut self, range: Range<usize>) -> BoxFuture<'_, Result<Bytes, ParquetError>> {
+        let data = self.data.clone();
         Box::pin(async move {
-            Ok(self.data.slice(range))
+            if range.end > data.len() {
+                return Err(ParquetError::EOF("Requested range extends beyond data length".to_string()));
+            }
+            Ok(data.slice(range))
         })
     }
 
