@@ -1,1 +1,9 @@
 /target
+
+cargo.lock
+
+# Cargo cache
+/.cargo
+
+# Build artifacts
+/target

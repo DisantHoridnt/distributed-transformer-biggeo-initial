@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+tokio = { version = "1.4", features = ["full"] }
+object_store = "0.11.1"       # Check crates.io for latest version
+arrow = "53.3.0"               # Check for latest compatible version, may vary
+arrow2 = "0.18.0"            # Consider arrow2 if you prefer the new API
+parquet = "53.3.0"            # For reading/writing parquet files
+futures = "0.3.31"
+anyhow = "1.0.94"             # For error handling
