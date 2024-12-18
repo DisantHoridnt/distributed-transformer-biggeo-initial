@@ -161,6 +161,59 @@ Run `make help` to see all available commands:
 - `make version`: Display version information
 - `make watch`: Watch for file changes and rebuild
 
+## Weather Data Processing Workflow
+
+This section describes how to use the application for processing weather data stored in Parquet format.
+
+### Data Processing Pipeline
+
+The application implements a data processing pipeline that:
+1. Reads Parquet files from S3
+2. Applies SQL filters using DataFusion
+3. Displays results in the terminal
+4. Optionally writes filtered results back to S3
+
+### Usage Example
+
+```bash
+# Basic usage with SQL filter
+cargo run -- \
+  --input-url "s3://your-bucket/weather.parquet" \
+  --output-url "s3://your-bucket/filtered_weather.parquet" \
+  --sql-filter "SELECT * FROM data LIMIT 10"
+```
+
+### Features
+
+- **SQL Filtering**: Apply SQL queries to filter and transform your data
+- **Pretty Printing**: Displays data in a formatted table in the terminal
+- **Storage Support**: Works with both local filesystem and S3 storage
+- **Asynchronous Processing**: Efficient handling of I/O operations
+
+### Example SQL Queries
+
+```sql
+-- Display first 10 rows
+SELECT * FROM data LIMIT 10
+
+-- Filter by specific conditions
+SELECT * FROM data WHERE temperature > 25
+
+-- Aggregate data
+SELECT AVG(temperature) as avg_temp, 
+       MAX(temperature) as max_temp,
+       MIN(temperature) as min_temp 
+FROM data
+```
+
+### Error Handling
+
+The application provides detailed error messages for common issues:
+- S3 connectivity problems
+- Invalid SQL queries
+- File access permissions
+- Data format inconsistencies
+
 ## Troubleshooting
 
 ### Common Issues

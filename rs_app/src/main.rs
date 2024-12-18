@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use anyhow::Result;
 use arrow::array::RecordBatch;
+use arrow::util::pretty::print_batches;
 use bytes::Bytes;
 use clap::Parser;
 use datafusion::datasource::MemTable;
@@ -84,13 +85,21 @@ async fn main() -> Result<()> {
     // Read input file
     let mut batches = read_parquet_file(storage.clone(), &input_url).await?;
     
+    println!("\nInput data sample:");
+    print_batches(&batches)?;
+    
     // Apply SQL filter if provided
     if let Some(sql) = args.filter_sql {
+        println!("\nApplying SQL filter: {}", sql);
         batches = apply_sql_filter(batches, &sql).await?;
+        
+        println!("\nFiltered data:");
+        print_batches(&batches)?;
     }
     
     // Write output file
     write_parquet_file(storage, &output_url, batches).await?;
+    println!("\nOutput written to: {}", output_url);
     
     Ok(())
 }
