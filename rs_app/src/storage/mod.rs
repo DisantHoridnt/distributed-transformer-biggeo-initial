@@ -1,16 +1,16 @@
+use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::sync::Arc;
 use url::Url;
 
-mod azure;
-mod local;
-mod s3;
+pub mod azure;
+pub mod local;
+pub mod s3;
 
-pub use azure::AzureStorage;
-pub use local::LocalStorage;
-pub use s3::S3Storage;
+use azure::AzureStorage;
+use local::LocalStorage;
+use s3::S3Storage;
 
 #[async_trait]
 pub trait Storage: Send + Sync {
@@ -19,11 +19,12 @@ pub trait Storage: Send + Sync {
     async fn put(&self, path: &str, data: Bytes) -> Result<()>;
 }
 
-pub fn from_url(url: &Url) -> Result<Arc<dyn Storage>> {
+pub async fn from_url(url: &Url) -> Result<Arc<dyn Storage>> {
     match url.scheme() {
         "file" => {
-            let path = url.path();
-            Ok(Arc::new(LocalStorage::new(path)?))
+            let path = url.path().to_string();
+            let storage = LocalStorage::new(path.into()).await?;
+            Ok(Arc::new(storage))
         }
         "s3" => {
             let bucket = url.host_str()
@@ -37,6 +38,6 @@ pub fn from_url(url: &Url) -> Result<Arc<dyn Storage>> {
                 .to_string();
             Ok(Arc::new(AzureStorage::new(container)?))
         }
-        scheme => Err(anyhow!("Unsupported storage scheme: {}", scheme)),
+        _ => Err(anyhow!("Unsupported URL scheme: {}", url.scheme())),
     }
 }

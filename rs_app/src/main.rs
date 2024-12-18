@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use anyhow::Result;
 use arrow::array::RecordBatch;
-use arrow::datatypes::Schema;
 use bytes::Bytes;
 use clap::Parser;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
 use futures::StreamExt;
+use std::io::Cursor;
 use tokio;
 use url::Url;
 
@@ -28,11 +28,13 @@ struct Args {
 
 async fn read_parquet_file(storage: Arc<dyn Storage>, url: &str) -> Result<Vec<RecordBatch>> {
     let data = storage.get(url).await?;
-    let reader = parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder::new(data)
-        .build()
-        .await?;
+    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(data, 1024)?;
     
-    let batches: Vec<RecordBatch> = reader.collect().await;
+    let mut batches = Vec::new();
+    for batch in reader {
+        batches.push(batch?);
+    }
+    
     Ok(batches)
 }
 
@@ -51,20 +53,18 @@ async fn apply_sql_filter(batches: Vec<RecordBatch>, sql: &str) -> Result<Vec<Re
 
 async fn write_parquet_file(storage: Arc<dyn Storage>, url: &str, batches: Vec<RecordBatch>) -> Result<()> {
     let schema = batches[0].schema();
-    let mut writer = parquet::arrow::AsyncArrowWriter::try_new(
-        Vec::new(),
-        schema,
-        None,
-    )?;
+    let mut buf = Vec::new();
+    {
+        let mut writer = parquet::arrow::ArrowWriter::try_new(&mut buf, schema, None)?;
 
-    for batch in batches {
-        writer.write(&batch).await?;
+        for batch in batches {
+            writer.write(&batch)?;
+        }
+
+        writer.close()?;
     }
-
-    writer.close().await?;
-    let data = writer.into_inner();
-    storage.put(url, Bytes::from(data)).await?;
     
+    storage.put(url, Bytes::from(buf)).await?;
     Ok(())
 }
 
@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
     let input_url = Url::parse(&args.input_url)?;
     let output_url = Url::parse(&args.output_url)?;
     
-    let storage = storage::from_url(&input_url)?;
+    let storage = storage::from_url(&input_url).await?;
     
     // Read input file
     let mut batches = read_parquet_file(storage.clone(), &args.input_url).await?;

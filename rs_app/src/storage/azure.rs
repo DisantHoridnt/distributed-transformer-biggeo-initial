@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::StreamExt;
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::{path::Path, ObjectStore};
 
