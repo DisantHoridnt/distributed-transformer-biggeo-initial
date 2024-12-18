@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: etl-job-
+spec:
+  entrypoint: run-job
+  arguments:
+    parameters:
+    - name: input_url
+      value: s3://mybucket/input_data.parquet
+    - name: output_url
+      value: s3://mybucket/transformed_data.parquet
+    - name: filter_sql
+      value: "SELECT * FROM data WHERE some_column > 100"
+  
+  templates:
+  - name: run-job
+    inputs:
+      parameters:
+      - name: input_url
+      - name: output_url
+      - name: filter_sql
+    container:
+      image: distributed-transformer:latest
+      command: ["/app/distributed-transformer"]
+      args:
+        - "--input-url"
+        - "{{inputs.parameters.input_url}}"
+        - "--output-url"
+        - "{{inputs.parameters.output_url}}"
+        - "--filter-sql"
+        - "{{inputs.parameters.filter_sql}}"
