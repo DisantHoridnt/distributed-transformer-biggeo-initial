@@ -1,7 +1,7 @@
 [package]
 name = "distributed-transformer"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 tokio = { version = "1.4", features = ["full"] }
@@ -16,5 +16,5 @@ tokio-util = { version = "0.7.10", features = ["io"] }
 futures-util = "0.3"
 async-trait = "0.1.74"
 clap = { version = "4.4", features = ["derive"] }
-datafusion = "33.0"
+datafusion = "43.0.0"
 url = "2.5"
