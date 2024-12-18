@@ -1,5 +1,3 @@
-/target
-
 Cargo.lock
 
 # Cargo cache
@@ -14,4 +12,3 @@ Cargo.lock
 .env.*
 
 *.iml
-
