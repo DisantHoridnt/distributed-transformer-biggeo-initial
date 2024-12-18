@@ -22,10 +22,7 @@ cd distributed-transformer
 2. Set up environment variables:
 ```bash
 # Copy the example .env file
-cp rs_app/.env.example rs_app/.env
-
-# Edit the .env file with your credentials
-vim rs_app/.env
+nano rs_app/.env
 ```
 
 Required environment variables in `.env`:
