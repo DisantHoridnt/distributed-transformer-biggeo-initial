@@ -1,65 +1,68 @@
-use super::Storage;
+use std::path::{Path, PathBuf};
+use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use anyhow::Result;
-use futures::stream::{self, BoxStream};
-use std::fs;
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
-use std::path::PathBuf;
+use futures::{stream, StreamExt};
+use tokio::fs;
+
+use super::Storage;
 
 pub struct LocalStorage {
     base_path: PathBuf,
 }
 
 impl LocalStorage {
-    pub fn new(base_path: String) -> Self {
-        Self { base_path: PathBuf::from(base_path) }
+    pub fn new<P: AsRef<Path>>(base_path: P) -> Result<Self> {
+        let base_path = base_path.as_ref().to_path_buf();
+        fs::create_dir_all(&base_path)?;
+        Ok(Self { base_path })
+    }
+
+    fn resolve_path(&self, path: &str) -> PathBuf {
+        self.base_path.join(path.trim_start_matches('/'))
     }
 }
 
 #[async_trait]
 impl Storage for LocalStorage {
-    async fn list(&self, prefix: Option<&str>) -> Result<BoxStream<'static, Result<String>>> {
-        let entries = fs::read_dir(&self.base_path)?;
-        let keys = entries
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let path = entry.path()
-                    .strip_prefix(&self.base_path)
-                    .ok()?
-                    .to_string_lossy()
-                    .into_owned();
-                if let Some(p) = prefix {
-                    if path.contains(p) {
-                        Some(Ok(path))
-                    } else {
-                        None
-                    }
-                } else {
-                    Some(Ok(path))
-                }
-            })
-            .collect::<Vec<_>>();
+    async fn list(&self, prefix: Option<&str>) -> Result<Vec<String>> {
+        let base_dir = match prefix {
+            Some(prefix) => self.resolve_path(prefix),
+            None => self.base_path.clone(),
+        };
 
-        Ok(stream::iter(keys).boxed())
+        let mut entries = Vec::new();
+        let mut read_dir = fs::read_dir(&base_dir).await?;
+        
+        while let Some(entry) = read_dir.next_await {
+            if let Ok(entry) = entry {
+                if let Ok(file_type) = entry.file_type().await {
+                    if file_type.is_file() {
+                        if let Ok(path) = entry.path().strip_prefix(&self.base_path) {
+                            if let Some(path_str) = path.to_str() {
+                                entries.push(path_str.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(entries)
     }
 
     async fn get(&self, path: &str) -> Result<Bytes> {
-        let full_path = self.base_path.join(path);
-        let mut file = File::open(full_path).await?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf).await?;
-        Ok(Bytes::from(buf))
+        let file_path = self.resolve_path(path);
+        let data = fs::read(file_path).await?;
+        Ok(Bytes::from(data))
     }
 
     async fn put(&self, path: &str, data: Bytes) -> Result<()> {
-        let full_path = self.base_path.join(path);
-        // Ensure parent directory exists
-        if let Some(parent) = full_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+        let file_path = self.resolve_path(path);
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).await?;
         }
-        tokio::fs::write(full_path, &data).await?;
+        fs::write(file_path, data).await?;
         Ok(())
     }
 }
