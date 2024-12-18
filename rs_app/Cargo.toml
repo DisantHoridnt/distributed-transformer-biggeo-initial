@@ -1,11 +1,11 @@
 [package]
 name = "distributed-transformer"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 tokio = { version = "1.4", features = ["full"] }
-object_store = { version = "0.11.1", features = ["aws"] }
+object_store = { version = "0.11.1", features = ["aws", "azure"] }
 arrow = { version = "53.3.0", features = ["prettyprint"] }
 parquet = { version = "53.3.0", features = ["arrow", "async"] }
 futures = { version = "0.3.31", features = ["io-compat"] }
@@ -18,3 +18,7 @@ async-trait = "0.1.74"
 clap = { version = "4.4", features = ["derive"] }
 datafusion = "43.0.0"
 url = "2.5"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.8"

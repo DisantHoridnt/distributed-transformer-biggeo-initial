@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: etl-config
+data:
+  aws_region: us-east-1
+  rust_log: "info"
