@@ -12,6 +12,8 @@ spec:
       value: s3://mybucket/transformed_data.parquet
     - name: filter_sql
       value: "SELECT * FROM data WHERE some_column > 100"
+    - name: image_tag
+      value: "latest"  # Can be overridden when submitting workflow
   
   templates:
   - name: run-job
@@ -20,8 +22,9 @@ spec:
       - name: input_url
       - name: output_url
       - name: filter_sql
+      - name: image_tag
     container:
-      image: distributed-transformer:latest
+      image: "rs_app/distributed-transformer:{{inputs.parameters.image_tag}}"
       command: ["/app/distributed-transformer"]
       args:
         - "--input-url"
