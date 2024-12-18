@@ -1,5 +1,4 @@
 use anyhow::Result;
-use object_store::{aws::AmazonS3Builder, path::Path, ObjectStore};
 use parquet::arrow::async_reader::{AsyncFileReader, ParquetRecordBatchStreamBuilder};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
@@ -21,6 +20,9 @@ use datafusion::prelude::*;
 use url::Url;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::WriterProperties;
+
+mod storage;
+use storage::Storage;
 
 #[derive(Parser)]
 struct Config {
@@ -155,24 +157,19 @@ async fn apply_sql_filter(batches: Vec<RecordBatch>, sql: &str) -> Result<Vec<Re
     Ok(result)
 }
 
-async fn write_parquet(store: &dyn ObjectStore, path: &Path, batches: &[RecordBatch]) -> Result<()> {
-    if batches.is_empty() {
-        return Ok(());
-    }
-    
-    let schema = batches[0].schema();
-    let props = WriterProperties::builder().build();
-    
-    let mut out_buf = Vec::new();
+async fn write_parquet(storage: &dyn Storage, path: &str, batches: &[RecordBatch]) -> Result<()> {
+    let mut buf = Vec::new();
     {
-        let mut writer = ArrowWriter::try_new(&mut out_buf, schema.clone(), Some(props))?;
+        let props = WriterProperties::builder().build();
+        let mut writer = ArrowWriter::try_new(&mut buf, batches[0].schema(), Some(props))?;
+        
         for batch in batches {
             writer.write(batch)?;
         }
         writer.close()?;
     }
-
-    store.put(path, bytes::Bytes::from(out_buf)).await?;
+    
+    storage.put(path, Bytes::from(buf)).await?;
     Ok(())
 }
 
@@ -181,44 +178,35 @@ async fn main() -> Result<()> {
     dotenv().ok();
     let config = Config::parse();
 
-    // Parse input and output URLs
+    // Initialize storage backends
+    let input_storage = storage::from_url(&config.input_url).await?;
+    let output_storage = storage::from_url(&config.output_url).await?;
+
+    // Extract input path from URL
     let input_url = Url::parse(&config.input_url)?;
+    let input_path = input_url.path().trim_start_matches('/');
+    
+    // Extract output path from URL
     let output_url = Url::parse(&config.output_url)?;
+    let output_path = output_url.path().trim_start_matches('/');
 
-    // Setup S3 client
-    let store = AmazonS3Builder::from_env()
-        .with_bucket_name(input_url.host_str().unwrap_or_default())
-        .build()?;
-
-    // Read input path
-    let input_path = Path::from(input_url.path().trim_start_matches('/'));
-    let get_result = store.get(&input_path).await?;
-    let data = get_result.bytes().await?;
-
-    // Create async reader
-    let reader = BytesReader::new(data);
+    // Read input data
+    let input_data = input_storage.get(input_path).await?;
+    let reader = BytesReader::new(input_data);
+    
     let stream = ParquetRecordBatchStreamBuilder::new(reader)
         .await?
         .build()?;
-
-    // Collect all batches
-    let mut batches = Vec::new();
-    let mut stream = Box::pin(stream);
-    while let Some(batch) = stream.try_next().await? {
-        batches.push(batch);
-    }
+    
+    let mut batches: Vec<RecordBatch> = stream.try_collect().await?;
 
     // Apply SQL filter if provided
-    let filtered_batches = if let Some(sql) = config.filter_sql {
-        apply_sql_filter(batches, &sql).await?
-    } else {
-        batches
-    };
+    if let Some(sql) = config.filter_sql {
+        batches = apply_sql_filter(batches, &sql)?;
+    }
 
-    // Write results
-    let output_path = Path::from(output_url.path().trim_start_matches('/'));
-    write_parquet(&store, &output_path, &filtered_batches).await?;
+    // Write output
+    write_parquet(&*output_storage, output_path, &batches).await?;
 
-    println!("Processing complete! Written to {}", config.output_url);
     Ok(())
 }

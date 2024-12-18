@@ -1,7 +1,23 @@
+# Version control
+.git
+.gitignore
+
+# Rust build artifacts
 target/
-.git/
-.env
-.env.*
+**/*.rs.bk
+
+# Development files
+*.md
+*.sh
+tests/
+examples/
+docs/
+
+# Editor files
+.vscode/
 .idea/
-*.iml
-k8s/
+*.swp
+*.swo
+
+# Don't ignore .env as we need it in the container
+!.env
