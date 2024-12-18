@@ -16,6 +16,7 @@ impl S3Storage {
     pub fn new(bucket: String) -> Result<Self> {
         let store = AmazonS3Builder::from_env()
             .with_bucket_name(&bucket)
+            .with_allow_http(true)  // Allow non-HTTPS connections
             .build()?;
         
         Ok(Self {
@@ -41,13 +42,13 @@ impl Storage for S3Storage {
     }
 
     async fn get(&self, path: &str) -> Result<Bytes> {
-        let path = Path::from(path);
+        let path = Path::from(path.trim_start_matches('/'));  // Remove leading slash
         let data = self.store.get(&path).await?.bytes().await?;
         Ok(data)
     }
 
     async fn put(&self, path: &str, data: Bytes) -> Result<()> {
-        let path = Path::from(path);
+        let path = Path::from(path.trim_start_matches('/'));  // Remove leading slash
         self.store.put(&path, data.into()).await?;
         Ok(())
     }

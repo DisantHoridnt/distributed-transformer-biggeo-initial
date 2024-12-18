@@ -30,7 +30,8 @@ pub async fn from_url(url: &Url) -> Result<Arc<dyn Storage>> {
             let bucket = url.host_str()
                 .ok_or_else(|| anyhow!("Missing bucket name in S3 URL"))?
                 .to_string();
-            Ok(Arc::new(S3Storage::new(bucket)?))
+            let storage = S3Storage::new(bucket)?;
+            Ok(Arc::new(storage))
         }
         "azure" => {
             let container = url.host_str()

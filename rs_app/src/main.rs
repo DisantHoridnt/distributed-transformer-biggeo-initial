@@ -26,8 +26,9 @@ struct Args {
     filter_sql: Option<String>,
 }
 
-async fn read_parquet_file(storage: Arc<dyn Storage>, url: &str) -> Result<Vec<RecordBatch>> {
-    let data = storage.get(url).await?;
+async fn read_parquet_file(storage: Arc<dyn Storage>, url: &Url) -> Result<Vec<RecordBatch>> {
+    let path = url.path();
+    let data = storage.get(path).await?;
     let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(data, 1024)?;
     
     let mut batches = Vec::new();
@@ -51,7 +52,7 @@ async fn apply_sql_filter(batches: Vec<RecordBatch>, sql: &str) -> Result<Vec<Re
     Ok(results)
 }
 
-async fn write_parquet_file(storage: Arc<dyn Storage>, url: &str, batches: Vec<RecordBatch>) -> Result<()> {
+async fn write_parquet_file(storage: Arc<dyn Storage>, url: &Url, batches: Vec<RecordBatch>) -> Result<()> {
     let schema = batches[0].schema();
     let mut buf = Vec::new();
     {
@@ -64,7 +65,8 @@ async fn write_parquet_file(storage: Arc<dyn Storage>, url: &str, batches: Vec<R
         writer.close()?;
     }
     
-    storage.put(url, Bytes::from(buf)).await?;
+    let path = url.path();
+    storage.put(path, Bytes::from(buf)).await?;
     Ok(())
 }
 
@@ -80,7 +82,7 @@ async fn main() -> Result<()> {
     let storage = storage::from_url(&input_url).await?;
     
     // Read input file
-    let mut batches = read_parquet_file(storage.clone(), &args.input_url).await?;
+    let mut batches = read_parquet_file(storage.clone(), &input_url).await?;
     
     // Apply SQL filter if provided
     if let Some(sql) = args.filter_sql {
@@ -88,7 +90,7 @@ async fn main() -> Result<()> {
     }
     
     // Write output file
-    write_parquet_file(storage, &output_url.path().trim_start_matches('/'), batches).await?;
+    write_parquet_file(storage, &output_url, batches).await?;
     
     Ok(())
 }
