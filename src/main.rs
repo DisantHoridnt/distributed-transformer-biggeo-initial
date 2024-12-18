@@ -16,6 +16,21 @@ use parquet::errors::ParquetError;
 use parquet::file::reader::{ChunkReader, Length, FileReader};
 use parquet::file::serialized_reader::SerializedFileReader;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use clap::Parser;
+use datafusion::prelude::*;
+use url::Url;
+use parquet::arrow::arrow_writer::ArrowWriter;
+use parquet::file::properties::WriterProperties;
+
+#[derive(Parser)]
+struct Config {
+    #[clap(long)]
+    input_url: String,
+    #[clap(long)]
+    output_url: String,
+    #[clap(long)]
+    filter_sql: Option<String>,
+}
 
 struct BytesReader {
     data: Bytes,
@@ -124,55 +139,86 @@ impl AsyncFileReader for BytesReader {
     }
 }
 
+async fn apply_sql_filter(batches: Vec<RecordBatch>, sql: &str) -> Result<Vec<RecordBatch>> {
+    let ctx = SessionContext::new();
+    
+    if batches.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let schema = batches[0].schema();
+    let mem_table = MemTable::try_new(schema, vec![batches])?;
+    ctx.register_table("data", Arc::new(mem_table))?;
+
+    let df = ctx.sql(sql).await?;
+    let result = df.collect().await?;
+    Ok(result)
+}
+
+async fn write_parquet(store: &dyn ObjectStore, path: &Path, batches: &[RecordBatch]) -> Result<()> {
+    if batches.is_empty() {
+        return Ok(());
+    }
+    
+    let schema = batches[0].schema();
+    let props = WriterProperties::builder().build();
+    
+    let mut out_buf = Vec::new();
+    {
+        let mut writer = ArrowWriter::try_new(&mut out_buf, schema.clone(), Some(props))?;
+        for batch in batches {
+            writer.write(batch)?;
+        }
+        writer.close()?;
+    }
+
+    store.put(path, bytes::Bytes::from(out_buf)).await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("Starting the distributed transformer...");
-
-    // Load environment variables from .env file
     dotenv().ok();
+    let config = Config::parse();
 
-    // Initialize S3 connection using environment variables
-    let s3 = AmazonS3Builder::new()
-        .with_access_key_id(env::var("AWS_ACCESS_KEY_ID").expect("AWS_ACCESS_KEY_ID must be set"))
-        .with_secret_access_key(env::var("AWS_SECRET_ACCESS_KEY").expect("AWS_SECRET_ACCESS_KEY must be set"))
-        .with_region(env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string()))
-        .with_bucket_name(env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set"))
+    // Parse input and output URLs
+    let input_url = Url::parse(&config.input_url)?;
+    let output_url = Url::parse(&config.output_url)?;
+
+    // Setup S3 client
+    let store = AmazonS3Builder::from_env()
+        .with_bucket_name(input_url.host_str().unwrap_or_default())
         .build()?;
 
-    // List contents of the bucket
-    println!("Listing contents of bucket {}:", env::var("S3_BUCKET_NAME").unwrap());
-    let mut list_stream = s3.list(None);
+    // Read input path
+    let input_path = Path::from(input_url.path().trim_start_matches('/'));
+    let get_result = store.get(&input_path).await?;
+    let data = get_result.bytes().await?;
 
-    while let Some(meta) = list_stream.try_next().await? {
-        println!("Found object: {}", meta.location);
+    // Create async reader
+    let reader = BytesReader::new(data);
+    let stream = ParquetRecordBatchStreamBuilder::new(reader)
+        .await?
+        .build()?;
+
+    // Collect all batches
+    let mut batches = Vec::new();
+    let mut stream = Box::pin(stream);
+    while let Some(batch) = stream.try_next().await? {
+        batches.push(batch);
     }
 
-    // Try to read the Parquet file
-    let path: Path = "input_data.parquet".into();
-    match s3.get(&path).await {
-        Ok(data) => {
-            let bytes = data.bytes().await?;
-            // Create async reader
-            let async_reader = BytesReader::new(bytes);
-            let stream = ParquetRecordBatchStreamBuilder::new(async_reader)
-                .await?
-                .build()?;
+    // Apply SQL filter if provided
+    let filtered_batches = if let Some(sql) = config.filter_sql {
+        apply_sql_filter(batches, &sql).await?
+    } else {
+        batches
+    };
 
-            // Process record batches asynchronously
-            let mut batch_count = 0;
-            let mut batches = Vec::new();
-            tokio::pin!(stream);
-            while let Some(batch) = stream.try_next().await? {
-                batch_count += 1;
-                batches.push(batch);
-            }
+    // Write results
+    let output_path = Path::from(output_url.path().trim_start_matches('/'));
+    write_parquet(&store, &output_path, &filtered_batches).await?;
 
-            println!("Successfully read {} record batches", batch_count);
-        }
-        Err(e) => {
-            println!("Error reading Parquet file: {}", e);
-        }
-    }
-
+    println!("Processing complete! Written to {}", config.output_url);
     Ok(())
 }
