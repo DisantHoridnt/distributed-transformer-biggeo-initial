@@ -1,135 +1,190 @@
 # Distributed Transformer
 
-A high-performance ETL tool built in Rust for processing large-scale Parquet files using Apache Arrow and DataFusion. This tool is designed to run in Kubernetes using Argo Workflows for orchestration.
-
-## Features
-
-- 🚀 **High Performance**: Built with Rust for maximum efficiency
-- 📊 **Parquet Support**: Read and write Apache Parquet files
-- 🔍 **SQL Filtering**: Apply SQL filters using DataFusion
-- ☁️ **Cloud Native**: Direct S3 integration
-- 🔄 **Streaming**: Asynchronous streaming of record batches
-- 🎯 **Kubernetes Ready**: Containerized and ready for K8s deployment
-- 🔧 **Easy Configuration**: Environment variables and CLI parameters
+A distributed ETL pipeline for transforming large datasets using Rust, with support for multiple storage backends (Local, S3, Azure).
 
 ## Prerequisites
 
 - Rust
 - Docker
-- Kubernetes cluster
+- kubectl
 - Argo Workflows
-- AWS credentials (for S3 access)
-
-## Project Structure
-
-```
-.
-├── k8s/                    # Kubernetes/Argo configurations
-│   └── workflow.yaml       # Argo workflow definition
-├── rs_app/                 # Rust application
-│   ├── src/               # Source code
-│   ├── Cargo.toml         # Rust dependencies
-│   ├── Dockerfile         # Container definition
-│   ├── .env              # Environment variables
-│   └── VERSION           # Application version
-└── Makefile              # Build and deployment automation
-```
+- AWS CLI (for S3 storage)
+- Azure CLI (for Azure storage)
 
 ## Quick Start
 
-1. **Configure AWS Credentials**
+1. Clone the repository:
+```bash
+git clone https://github.com/DisantHoridnt/distributed-transformer.git
+cd distributed-transformer
+```
 
-   Create a `.env` file in the `rs_app` directory:
-   ```env
-   AWS_ACCESS_KEY_ID=your_access_key
-   AWS_SECRET_ACCESS_KEY=your_secret_key
-   AWS_REGION=your_region
-   ```
+2. Set up environment variables:
+```bash
+# Copy the example .env file
+cp rs_app/.env.example rs_app/.env
 
-2. **Build and Deploy**
+# Edit the .env file with your credentials
+vim rs_app/.env
+```
 
-   ```bash
-   # Build the Docker image and deploy to Kubernetes
-   make k8s-deploy
-   ```
+Required environment variables in `.env`:
+```env
+# AWS
+AWS_ACCESS_KEY_ID=your_aws_key
+AWS_SECRET_ACCESS_KEY=your_aws_secret
+AWS_REGION=your_aws_region
+S3_BUCKET_NAME=your_bucket_name
 
-   Or with custom parameters:
-   ```bash
-   make k8s-deploy \
-     INPUT_URL=s3://my-bucket/input.parquet \
-     OUTPUT_URL=s3://my-bucket/output.parquet \
-     SQL_FILTER="SELECT * FROM data WHERE value > 100"
-   ```
+# Azure (if using Azure storage)
+AZURE_STORAGE_ACCOUNT=your_azure_account
+AZURE_STORAGE_ACCESS_KEY=your_azure_key
+
+# Test Configuration
+TEST_S3_BUCKET=your_test_bucket
+TEST_AZURE_CONTAINER=your_test_container
+```
 
 ## Development
 
-### Available Make Commands
+### Building
 
-- `make build` - Build the Docker image
-- `make test` - Run tests
-- `make fmt` - Format Rust code
-- `make run` - Submit Argo workflow
-- `make clean` - Clean up build artifacts
-- `make watch` - Watch for changes and rebuild
-- `make k8s-deploy` - Build and deploy to Kubernetes
-- `make k8s-delete` - Delete workflows from Kubernetes
+```bash
+# Format code
+make fmt
 
-### Local Development
+# Run lints
+make lint
 
-1. **Setup Development Environment**
-   ```bash
-   cd rs_app
-   cargo build
-   ```
+# Build the project
+make build
 
-2. **Run Tests**
-   ```bash
-   cargo test
-   ```
+# Clean build artifacts
+make clean
+```
 
-3. **Format Code**
-   ```bash
-   cargo fmt
-   ```
+### Testing
 
-## Architecture
+```bash
+# Run local storage tests
+make test-local
 
-### Components
+# Run S3 storage tests (requires AWS credentials)
+make test-s3
 
-1. **BytesReader & SyncReader**
-   - Custom implementations for reading Parquet files
-   - Supports both synchronous and asynchronous operations
-   - Efficient memory management for large files
+# Run Azure storage tests (requires Azure credentials)
+make test-azure
 
-2. **SQL Processing**
-   - Uses DataFusion for SQL query execution
-   - Supports filtering and transformation of data
-   - Memory-efficient batch processing
+# Run all tests
+make test
 
-3. **S3 Integration**
-   - Direct integration with S3 using object_store
-   - Streaming support for large files
-   - Configurable through environment variables
+# Generate test coverage report
+make coverage
+```
 
-### Workflow
+### Running Locally
 
-1. Read Parquet file from S3
-2. Stream record batches
-3. Apply SQL transformations (optional)
-4. Write results back to S3
+```bash
+# Run with default configuration
+make run
 
-## Configuration
+# Run with custom parameters
+make run INPUT_URL="s3://mybucket/input.parquet" \
+         OUTPUT_URL="s3://mybucket/output.parquet" \
+         SQL_FILTER="SELECT * FROM data WHERE column > 100"
 
-### Environment Variables
+# Watch for changes and rebuild
+make watch
+```
 
-Put it all in rs_app/.env
+## Docker
 
-- `AWS_ACCESS_KEY_ID` - AWS access key
-- `AWS_SECRET_ACCESS_KEY` - AWS secret key
-- `AWS_REGION` - AWS region
+```bash
+# Build Docker image
+make build
 
-### CLI Parameters
+# Push to registry
+make push
 
-- `--input-url` - S3 URL for input Parquet file
-- `--output-url` - S3 URL for output file
-- `--filter-sql` - Optional SQL filter
+# Build with custom tag
+make build IMAGE_TAG=custom-tag
+```
+
+## Kubernetes Deployment
+
+### Prerequisites
+1. A running Kubernetes cluster
+2. Argo Workflows installed
+3. kubectl configured with cluster access
+4. Docker registry access
+
+### Deployment Steps
+
+1. Deploy to Kubernetes:
+```bash
+# Deploy with default configuration
+make k8s-deploy
+
+# Deploy with custom parameters
+make k8s-deploy \
+    INPUT_URL="s3://mybucket/input.parquet" \
+    OUTPUT_URL="s3://mybucket/output.parquet" \
+    SQL_FILTER="SELECT * FROM data WHERE column > 100" \
+    K8S_NAMESPACE="my-namespace"
+```
+
+2. Delete deployment:
+```bash
+make k8s-delete
+```
+
+## Storage Backend URLs
+
+The application supports different storage backends through URLs:
+
+- Local storage: `file:///path/to/file.parquet`
+- S3 storage: `s3://bucket-name/path/to/file.parquet`
+- Azure storage: `azure://container-name/path/to/file.parquet`
+
+## Makefile Commands
+
+Run `make help` to see all available commands:
+
+- `make all`: Build and test everything
+- `make build`: Build the Docker image
+- `make push`: Push the Docker image to registry
+- `make run`: Run locally
+- `make test`: Run all tests
+- `make clean`: Clean build artifacts
+- `make fmt`: Format Rust code
+- `make lint`: Run clippy lints
+- `make coverage`: Generate test coverage report
+- `make k8s-deploy`: Deploy to Kubernetes
+- `make k8s-delete`: Delete Kubernetes resources
+- `make version`: Display version information
+- `make watch`: Watch for file changes and rebuild
+
+## Troubleshooting
+
+### Common Issues
+
+1. **AWS Credentials**
+   - Ensure AWS credentials are properly set in `.env`
+   - Verify AWS CLI configuration
+   - Check S3 bucket permissions
+
+2. **Azure Storage**
+   - Verify Azure credentials in `.env`
+   - Check container permissions
+   - Ensure Azure CLI is configured
+
+3. **Kubernetes Deployment**
+   - Verify cluster access: `kubectl cluster-info`
+   - Check pod logs: `kubectl logs -n <namespace> <pod-name>`
+   - Verify Argo workflow status: `argo list -n <namespace>`
+
+### Logs
+
+- Application logs: Available through `kubectl logs` or Argo UI
+- Test logs: Use `RUST_LOG=debug` for verbose logging
+- Build logs: Check Docker build output
