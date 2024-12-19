@@ -6,6 +6,8 @@ use anyhow::Result;
 use bytes::Bytes;
 use std::sync::Arc;
 use object_store::GetResult;
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 
 mod parquet_format;
 mod csv_format;
@@ -60,17 +62,40 @@ pub trait DataFormat: Send + Sync + SchemaInference {
     fn clone_box(&self) -> Box<dyn DataFormat + Send + Sync>;
 }
 
-type FormatFactory = fn() -> Box<dyn DataFormat + Send + Sync>;
-
-lazy_static! {
-    static ref FORMAT_REGISTRY: std::collections::HashMap<&'static str, FormatFactory> = {
+// Format registry that combines built-in and plugin formats
+static FORMAT_REGISTRY: Lazy<RwLock<std::collections::HashMap<String, Box<dyn Fn() -> Box<dyn DataFormat + Send + Sync> + Send + Sync>>>> = 
+    Lazy::new(|| {
         let mut m = std::collections::HashMap::new();
-        m.insert("parquet", || Box::new(ParquetFormat));
-        m.insert("csv", || Box::new(CsvFormat::new(true, 1024)));
-        m
-    };
+        // Register built-in formats
+        m.insert("parquet".to_string(), Box::new(|| Box::new(ParquetFormat::default())));
+        m.insert("csv".to_string(), Box::new(|| Box::new(CsvFormat::new(true, 1024))));
+        RwLock::new(m)
+    });
+
+/// Get a format implementation by name
+pub fn get_format(name: &str) -> Option<Box<dyn DataFormat + Send + Sync>> {
+    FORMAT_REGISTRY.read().get(name).map(|factory| factory())
 }
 
-pub fn get_format_for_extension(ext: &str) -> Option<Box<dyn DataFormat + Send + Sync>> {
-    FORMAT_REGISTRY.get(ext).map(|factory| factory())
+/// Register a new format implementation
+pub fn register_format<F>(name: &str, factory: F)
+where
+    F: Fn() -> Box<dyn DataFormat + Send + Sync> + Send + Sync + 'static,
+{
+    FORMAT_REGISTRY.write().insert(name.to_string(), Box::new(factory));
+}
+
+/// Get a format implementation for a file extension
+pub fn get_format_for_extension(extension: &str) -> Option<Box<dyn DataFormat + Send + Sync>> {
+    // First check plugins
+    if let Some(plugin) = crate::plugin::PluginManager::get_plugin_for_extension(extension) {
+        return Some(plugin.create_format());
+    }
+    
+    // Then check built-in formats
+    match extension {
+        "parquet" => Some(Box::new(ParquetFormat::default())),
+        "csv" => Some(Box::new(CsvFormat::new(true, 1024))),
+        _ => None,
+    }
 }

@@ -1,0 +1,15 @@
+[package]
+name = "json_plugin"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+distributed_transformer = { path = "../.." }
+async-trait = "0.1"
+anyhow = "1.0"
+arrow = { version = "47.0", features = ["prettyprint"] }
+bytes = "1.0"
+futures = "0.3"

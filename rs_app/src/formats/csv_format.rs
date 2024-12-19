@@ -9,83 +9,37 @@ use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
 
 use crate::formats::{DataFormat, SchemaInference};
+use crate::config::{Config, CsvConfig};
 
 #[derive(Clone)]
 pub struct CsvFormat {
+    config: Arc<CsvConfig>,
     schema: Option<SchemaRef>,
-    has_header: bool,
-    batch_size: usize,
-    sample_size: usize,  // Number of rows to sample for type inference
 }
 
 impl CsvFormat {
-    pub fn new(has_header: bool, batch_size: usize) -> Self {
+    pub fn new(config: &CsvConfig) -> Self {
         Self {
+            config: Arc::new(config.clone()),
             schema: None,
-            has_header,
-            batch_size,
-            sample_size: 1000,  // Default to sampling 1000 rows
         }
     }
 
-    pub fn with_schema(schema: SchemaRef, has_header: bool, batch_size: usize) -> Self {
+    pub fn with_schema(schema: SchemaRef, config: &CsvConfig) -> Self {
         Self {
+            config: Arc::new(config.clone()),
             schema: Some(schema),
-            has_header,
-            batch_size,
-            sample_size: 1000,
         }
     }
 
-    fn infer_field_type(&self, values: &[String]) -> DataType {
-        let mut has_int = true;
-        let mut has_float = true;
-        let mut all_empty = true;
-
-        for value in values {
-            if value.is_empty() {
-                continue;
-            }
-            all_empty = false;
-
-            // Try parsing as integer
-            if has_int && value.parse::<i64>().is_err() {
-                has_int = false;
-            }
-
-            // Try parsing as float
-            if has_float && value.parse::<f64>().is_err() {
-                has_float = false;
-            }
-
-            // If neither int nor float, must be string
-            if !has_int && !has_float {
-                break;
-            }
+    fn validate_schema(schema: &Schema, batch: &RecordBatch) -> Result<()> {
+        if schema != batch.schema().as_ref() {
+            return Err(anyhow::anyhow!(
+                "Schema mismatch. Expected: {:?}, Got: {:?}",
+                schema,
+                batch.schema()
+            ));
         }
-
-        if all_empty {
-            DataType::Utf8
-        } else if has_int {
-            DataType::Int64
-        } else if has_float {
-            DataType::Float64
-        } else {
-            DataType::Utf8
-        }
-    }
-
-    fn validate_schema(schema: &SchemaRef, batch: &RecordBatch) -> Result<()> {
-        if schema.fields().len() != batch.num_columns() {
-            return Err(anyhow::anyhow!("Schema mismatch: expected {} columns, got {}", schema.fields().len(), batch.num_columns()));
-        }
-
-        for (i, field) in schema.fields().iter().enumerate() {
-            if field.data_type() != batch.column(i).data_type() {
-                return Err(anyhow::anyhow!("Schema mismatch: expected column {} to be of type {:?}, got {:?}", i, field.data_type(), batch.column(i).data_type()));
-            }
-        }
-
         Ok(())
     }
 }
@@ -97,53 +51,63 @@ impl SchemaInference for CsvFormat {
             return Ok(schema.clone());
         }
 
-        let cursor = Cursor::new(data);
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(self.has_header)
-            .flexible(true)
-            .from_reader(cursor);
-
-        let headers = if self.has_header {
-            reader.headers()?.iter().map(|s| s.to_string()).collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-
-        // Read sample rows for type inference
-        let mut columns: Vec<Vec<String>> = Vec::new();
+        let mut reader = csv::Reader::from_reader(data);
+        let mut sample_rows = Vec::new();
         let mut row_count = 0;
-        let mut column_count = 0;
 
-        for result in reader.records() {
+        // Skip header if needed
+        if self.config.default_has_header {
+            reader.headers()?;
+        }
+
+        // Sample rows for type inference
+        while let Some(result) = reader.records().next() {
             let record = result?;
-            if columns.is_empty() {
-                column_count = record.len();
-                columns = vec![Vec::new(); column_count];
-            }
-
-            for (i, field) in record.iter().enumerate() {
-                if i < column_count {
-                    columns[i].push(field.to_string());
-                }
-            }
-
+            sample_rows.push(record);
             row_count += 1;
-            if row_count >= self.sample_size {
+            if row_count >= self.config.schema_sample_size {
                 break;
             }
         }
 
-        // Infer types for each column
-        let fields = columns.iter().enumerate().map(|(i, values)| {
-            let name = if self.has_header && i < headers.len() {
-                headers[i].clone()
-            } else {
-                format!("column_{}", i)
-            };
-            
-            let data_type = self.infer_field_type(values);
-            Field::new(name, data_type, true)
-        }).collect();
+        // Infer field types from samples
+        let mut fields = Vec::new();
+        if !sample_rows.is_empty() {
+            let num_cols = sample_rows[0].len();
+            for col in 0..num_cols {
+                let field_name = if self.config.default_has_header {
+                    reader.headers()?.get(col).unwrap_or(&format!("col_{}", col)).to_string()
+                } else {
+                    format!("col_{}", col)
+                };
+
+                // Infer type from samples
+                let mut has_non_numeric = false;
+                let mut has_decimal = false;
+                for row in &sample_rows {
+                    if let Some(value) = row.get(col) {
+                        if !value.parse::<i64>().is_ok() {
+                            if value.parse::<f64>().is_ok() {
+                                has_decimal = true;
+                            } else {
+                                has_non_numeric = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                let data_type = if has_non_numeric {
+                    DataType::Utf8
+                } else if has_decimal {
+                    DataType::Float64
+                } else {
+                    DataType::Int64
+                };
+
+                fields.push(Field::new(field_name, data_type, true));
+            }
+        }
 
         Ok(Arc::new(Schema::new(fields)))
     }
@@ -152,20 +116,19 @@ impl SchemaInference for CsvFormat {
 #[async_trait]
 impl DataFormat for CsvFormat {
     async fn read_batches(&self, data: Bytes) -> Result<BoxStream<'static, Result<RecordBatch>>> {
-        // Infer schema if not provided
         let schema = self.infer_schema(&data).await?;
 
         let cursor = Cursor::new(data);
         let reader = ReaderBuilder::new(schema.clone())
-            .has_header(self.has_header)
-            .with_batch_size(self.batch_size)
+            .has_header(self.config.default_has_header)
+            .with_delimiter(self.config.delimiter as u8)
+            .with_quote(self.config.quote as u8)
+            .with_batch_size(self.config.batch_size)
             .build(cursor)?;
 
-        // Create a stream that validates schema for each batch
         let schema_clone = schema.clone();
         let stream = stream::iter(reader.into_iter().map(move |batch_result| {
             let batch = batch_result?;
-            // Validate schema
             Self::validate_schema(&schema_clone, &batch)?;
             Ok(batch)
         }));
@@ -183,14 +146,14 @@ impl DataFormat for CsvFormat {
         let schema = batches[0].schema();
         let mut buf = Vec::new();
         {
-            let mut writer = arrow::csv::Writer::new(&mut buf);
+            let mut writer = arrow::csv::Writer::new(&mut buf)
+                .with_delimiter(self.config.delimiter as u8)
+                .with_quote(self.config.quote as u8);
 
-            // Write header if needed
-            if self.has_header {
+            if self.config.default_has_header {
                 writer.write_schema(&schema)?;
             }
 
-            // Write batches with schema validation
             for batch in batches {
                 self.validate_schema(&schema, &batch)?;
                 writer.write(&batch)?;
