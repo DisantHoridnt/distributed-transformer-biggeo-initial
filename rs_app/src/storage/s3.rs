@@ -17,7 +17,11 @@ impl S3Storage {
         let store = AmazonS3Builder::new()
             .with_bucket_name(&bucket)
             .with_allow_http(true)
-            .with_imdsv1_fallback()
+            .with_region(std::env::var("AWS_DEFAULT_REGION").unwrap_or_else(|_| "us-east-1".to_string()))
+            .with_access_key_id(std::env::var("AWS_ACCESS_KEY_ID")?)
+            .with_secret_access_key(std::env::var("AWS_SECRET_ACCESS_KEY")?)
+            .with_endpoint("https://s3.us-east-1.amazonaws.com")
+            .with_skip_signature(true)
             .build()?;
         Ok(Self {
             store: Box::new(store),
