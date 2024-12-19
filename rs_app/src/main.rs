@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dotenv::dotenv;
 use url::Url;
+use datafusion::arrow::util::pretty;
 
 use crate::formats::{CsvFormat, DataFormat, ParquetFormat};
 use crate::storage::azure::AzureStorage;
@@ -51,6 +52,19 @@ async fn get_format_for_url(url: &Url) -> Result<Box<dyn DataFormat + Send + Syn
     }
 }
 
+async fn print_dataframe(df: &DataFrame) -> Result<()> {
+    let batches = df.clone().collect().await?;
+    if !batches.is_empty() {
+        let table = pretty::pretty_format_batches(&batches)?;
+        println!("\nQuery Results:");
+        println!("{}", table.to_string());
+        println!("\nTotal rows: {}", batches.iter().map(|b| b.num_rows()).sum::<usize>());
+    } else {
+        println!("\nNo results found.");
+    }
+    Ok(())
+}
+
 async fn convert(input: &str, output: &str, filter_sql: Option<String>) -> Result<()> {
     // Parse URLs
     let input_url = Url::parse(input)?;
@@ -72,18 +86,25 @@ async fn convert(input: &str, output: &str, filter_sql: Option<String>) -> Resul
     if let Some(sql) = filter_sql {
         let ctx = SessionContext::new();
         ctx.register_table("data", df.clone().into_view())?;
-        let sql = if sql.to_lowercase().contains("where") {
+        let sql = if sql.to_lowercase() == "true" {
+            "SELECT * FROM data LIMIT 10".to_string()
+        } else if !sql.to_lowercase().contains("where") {
             format!("SELECT * FROM data WHERE {} LIMIT 10", sql)
         } else {
             format!("SELECT * FROM data {} LIMIT 10", sql)
         };
+        println!("\nExecuting SQL: {}", sql);
         df = ctx.sql(&sql).await?;
+        
+        // Print the filtered results
+        print_dataframe(&df).await?;
     }
 
     // Write output
     let output_data = output_format.write(&df)?;
     output_storage.write(&output_url, output_data).await?;
-
+    
+    println!("\nSuccessfully wrote output to: {}", output_url);
     Ok(())
 }
 
