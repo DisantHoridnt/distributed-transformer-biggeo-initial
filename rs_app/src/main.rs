@@ -1,105 +1,122 @@
-use std::sync::Arc;
 use anyhow::Result;
-use arrow::array::RecordBatch;
-use arrow::util::pretty::print_batches;
-use bytes::Bytes;
-use clap::Parser;
-use datafusion::datasource::MemTable;
-use datafusion::prelude::*;
-use futures::StreamExt;
-use std::io::Cursor;
-use tokio;
+use clap::{Parser, Subcommand};
+use dotenv::dotenv;
 use url::Url;
+use datafusion::arrow::util::pretty;
 
+use crate::formats::{CsvFormat, DataFormat, ParquetFormat};
+use crate::storage::azure::AzureStorage;
+use crate::storage::local::LocalStorage;
+use crate::storage::s3::S3Storage;
+
+mod formats;
 mod storage;
-use storage::Storage;
+mod table_provider;
+mod execution;
 
-#[derive(Parser, Debug)]
+use datafusion::prelude::*;
+
+#[derive(Parser)]
 #[command(author, version, about, long_about = None)]
-struct Args {
-    #[arg(short, long)]
-    input_url: String,
-
-    #[arg(short, long)]
-    output_url: String,
-
-    #[arg(short, long)]
-    filter_sql: Option<String>,
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
 }
 
-async fn read_parquet_file(storage: Arc<dyn Storage>, url: &Url) -> Result<Vec<RecordBatch>> {
-    let path = url.path();
-    let data = storage.get(path).await?;
-    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(data, 1024)?;
-    
-    let mut batches = Vec::new();
-    for batch in reader {
-        batches.push(batch?);
+#[derive(Subcommand)]
+enum Commands {
+    Convert {
+        #[arg(short, long)]
+        input: String,
+        #[arg(short, long)]
+        output: String,
+        #[arg(long)]
+        filter_sql: Option<String>,
+    },
+}
+
+async fn get_storage_for_url(url: &Url) -> Result<Box<dyn storage::Storage>> {
+    match url.scheme() {
+        "s3" => Ok(Box::new(S3Storage::new(url.host_str().unwrap().to_string())?)),
+        "azure" => Ok(Box::new(AzureStorage::new(url.host_str().unwrap().to_string())?)),
+        "file" | _ => Ok(Box::new(LocalStorage::new()?)),
     }
-    
-    Ok(batches)
 }
 
-async fn apply_sql_filter(batches: Vec<RecordBatch>, sql: &str) -> Result<Vec<RecordBatch>> {
-    let schema = batches[0].schema();
-    let mem_table = MemTable::try_new(schema, vec![batches])?;
-    
-    let ctx = SessionContext::new();
-    ctx.register_table("data", Arc::new(mem_table))?;
-    
-    let df = ctx.sql(sql).await?;
-    let results = df.collect().await?;
-    
-    Ok(results)
-}
-
-async fn write_parquet_file(storage: Arc<dyn Storage>, url: &Url, batches: Vec<RecordBatch>) -> Result<()> {
-    let schema = batches[0].schema();
-    let mut buf = Vec::new();
-    {
-        let mut writer = parquet::arrow::ArrowWriter::try_new(&mut buf, schema, None)?;
-
-        for batch in batches {
-            writer.write(&batch)?;
-        }
-
-        writer.close()?;
-    }
-    
+async fn get_format_for_url(url: &Url) -> Result<Box<dyn DataFormat + Send + Sync>> {
     let path = url.path();
-    storage.put(path, Bytes::from(buf)).await?;
+    match path.split('.').last() {
+        Some("csv") => Ok(Box::new(CsvFormat::default())),
+        Some("parquet") => Ok(Box::new(ParquetFormat::default())),
+        _ => Err(anyhow::anyhow!("Unsupported file format")),
+    }
+}
+
+async fn print_dataframe(df: &DataFrame) -> Result<()> {
+    let batches = df.clone().collect().await?;
+    if !batches.is_empty() {
+        let table = pretty::pretty_format_batches(&batches)?;
+        println!("\nQuery Results:");
+        println!("{}", table.to_string());
+        println!("\nTotal rows: {}", batches.iter().map(|b| b.num_rows()).sum::<usize>());
+    } else {
+        println!("\nNo results found.");
+    }
+    Ok(())
+}
+
+async fn convert(input: &str, output: &str, filter_sql: Option<String>) -> Result<()> {
+    // Parse URLs
+    let input_url = Url::parse(input)?;
+    let output_url = Url::parse(output)?;
+
+    // Get storage implementations
+    let input_storage = get_storage_for_url(&input_url).await?;
+    let output_storage = get_storage_for_url(&output_url).await?;
+
+    // Get format implementations
+    let input_format = get_format_for_url(&input_url).await?;
+    let output_format = get_format_for_url(&output_url).await?;
+
+    // Read input data
+    let input_data = input_storage.read_all(&input_url).await?;
+    let mut df = input_format.read(&input_data)?;
+
+    // Apply filter if provided
+    if let Some(sql) = filter_sql {
+        let ctx = SessionContext::new();
+        ctx.register_table("data", df.clone().into_view())?;
+        let sql = if sql.to_lowercase() == "true" {
+            "SELECT * FROM data LIMIT 10".to_string()
+        } else if !sql.to_lowercase().contains("where") {
+            format!("SELECT * FROM data WHERE {} LIMIT 10", sql)
+        } else {
+            format!("SELECT * FROM data {} LIMIT 10", sql)
+        };
+        println!("\nExecuting SQL: {}", sql);
+        df = ctx.sql(&sql).await?;
+        
+        // Print the filtered results
+        print_dataframe(&df).await?;
+    }
+
+    // Write output
+    let output_data = output_format.write(&df)?;
+    output_storage.write(&output_url, output_data).await?;
+    
+    println!("\nSuccessfully wrote output to: {}", output_url);
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenv::dotenv().ok();
-    
-    let args = Args::parse();
-    
-    let input_url = Url::parse(&args.input_url)?;
-    let output_url = Url::parse(&args.output_url)?;
-    
-    let storage = storage::from_url(&input_url).await?;
-    
-    // Read input file
-    let mut batches = read_parquet_file(storage.clone(), &input_url).await?;
-    
-    println!("\nInput data sample:");
-    print_batches(&batches)?;
-    
-    // Apply SQL filter if provided
-    if let Some(sql) = args.filter_sql {
-        println!("\nApplying SQL filter: {}", sql);
-        batches = apply_sql_filter(batches, &sql).await?;
-        
-        println!("\nFiltered data:");
-        print_batches(&batches)?;
+    dotenv().ok();
+
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Convert { input, output, filter_sql } => convert(&input, &output, filter_sql).await?,
     }
-    
-    // Write output file
-    write_parquet_file(storage, &output_url, batches).await?;
-    println!("\nOutput written to: {}", output_url);
-    
+
     Ok(())
 }

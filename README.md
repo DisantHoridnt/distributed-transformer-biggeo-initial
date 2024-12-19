@@ -1,240 +1,134 @@
 # Distributed Transformer
 
-A distributed ETL pipeline for transforming large datasets using Rust, with support for multiple storage backends (Local, S3, Azure).
+A high-performance, streaming ETL system built in Rust using DataFusion, with support for multiple data formats and dynamic plugin loading.
 
-## Prerequisites
+## Features
 
-- Rust
-- Docker
-- kubectl
-- Argo Workflows
-- AWS CLI (for S3 storage)
-- Azure CLI (for Azure storage)
+### Core Processing
+- **Streaming Processing**: Zero-copy streaming for large datasets
+- **Memory Efficient**: Buffer pool with backpressure mechanisms
+- **Format Agnostic**: Extensible format system with built-in CSV and Parquet support
+- **Plugin System**: Dynamic format discovery and loading
 
-## Quick Start
+### Data Formats
+- **CSV**
+  - Streaming read/write
+  - Schema inference
+  - Configurable delimiters and quotes
+  - Header detection
 
-1. Clone the repository:
-```bash
-git clone https://github.com/DisantHoridnt/distributed-transformer.git
-cd distributed-transformer
+- **Parquet**
+  - Row group-based streaming
+  - Multiple compression codecs
+  - Statistics optimization
+  - Dictionary encoding
+
+### Performance Features
+- **Buffer Pool**
+  - Pre-allocated memory management
+  - RAII-based buffer handling
+  - Configurable pool sizes
+  - Automatic buffer recycling
+
+- **Streaming Optimizations**
+  - Backpressure control
+  - Configurable batch sizes
+  - Memory-mapped I/O support
+  - Parallel processing
+
+### Plugin System
+- **Dynamic Loading**: Runtime format discovery
+- **Version Control**: Compatibility checking
+- **Hot Reload**: Optional runtime updates
+- **Custom Configs**: Per-plugin configuration
+
+## Configuration
+
+The system uses a comprehensive configuration system:
+- YAML-based configuration files
+- Type-safe configuration structs
+- Extensive validation
+- Default values for all settings
+
+See [Configuration Documentation](docs/configuration.md) for details.
+
+## Getting Started
+
+1. **Installation**
+   ```bash
+   cargo build --release
+   ```
+
+2. **Basic Usage**
+   ```rust
+   use distributed_transformer::{Config, CsvFormat, ParquetFormat};
+
+   // Load configuration
+   let config = Config::from_file("config.yaml")?;
+
+   // Create format with configuration
+   let format = CsvFormat::new(&config.formats.csv);
+
+   // Process data
+   let provider = FormatTableProvider::try_new(format, storage, "data.csv").await?;
+   ```
+
+3. **Configuration**
+   Copy and modify the example configuration:
+   ```bash
+   cp config.example.yaml config.yaml
+   ```
+
+## Documentation
+
+- [Configuration Guide](docs/configuration.md)
+- [Migration Guide](docs/migration.md)
+- [Plugin Development](docs/plugins.md)
+
+## Technical Details
+
+### Memory Management
+The system uses a sophisticated memory management system:
+```rust
+pub struct BufferPool {
+    buffers: Arc<Mutex<Vec<BytesMut>>>,
+    semaphore: Arc<Semaphore>,
+    buffer_size: usize,
+    max_memory: usize,
+}
 ```
 
-2. Set up environment variables:
-```bash
-# Copy the example .env file
-nano rs_app/.env
+### Streaming Architecture
+```rust
+pub trait DataFormat: Send + Sync {
+    async fn read_batches(&self, data: Bytes) -> Result<BoxStream<'static, Result<RecordBatch>>>;
+    async fn read_batches_from_stream(&self, schema: SchemaRef, stream: DataStream) 
+        -> Result<BoxStream<'static, Result<RecordBatch>>>;
+    async fn write_batches(&self, batches: BoxStream<'static, Result<RecordBatch>>) -> Result<Bytes>;
+}
 ```
 
-Required environment variables in `.env`:
-```env
-# AWS
-AWS_ACCESS_KEY_ID=your_aws_key
-AWS_SECRET_ACCESS_KEY=your_aws_secret
-AWS_REGION=your_aws_region
-S3_BUCKET_NAME=your_bucket_name
-
-# Azure (if using Azure storage)
-AZURE_STORAGE_ACCOUNT=your_azure_account
-AZURE_STORAGE_ACCESS_KEY=your_azure_key
-
-# Test Configuration
-TEST_S3_BUCKET=your_test_bucket
-TEST_AZURE_CONTAINER=your_test_container
+### Plugin System
+```rust
+pub trait FormatPlugin: Send + Sync {
+    fn metadata(&self) -> &PluginMetadata;
+    fn create_format(&self, config: &Config) -> Result<Box<dyn DataFormat + Send + Sync>>;
+}
 ```
 
-## Development
+## Performance Considerations
 
-### Building
+### Memory Usage
+- Configure `max_buffer_memory` based on available RAM
+- Adjust `buffer_pool_size` for workload
+- Set appropriate batch sizes
 
-```bash
-# Format code
-make fmt
+### Throughput
+- Tune `max_in_flight_batches`
+- Configure parallel processing threads
+- Optimize row group sizes for Parquet
 
-# Run lints
-make lint
-
-# Build the project
-make build
-
-# Clean build artifacts
-make clean
-```
-
-### Testing
-
-```bash
-# Run local storage tests
-make test-local
-
-# Run S3 storage tests (requires AWS credentials)
-make test-s3
-
-# Run Azure storage tests (requires Azure credentials)
-make test-azure
-
-# Run all tests
-make test
-
-# Generate test coverage report
-make coverage
-```
-
-### Running Locally
-
-```bash
-# Run with default configuration
-make run
-
-# Run with custom parameters
-make run INPUT_URL="s3://mybucket/input.parquet" \
-         OUTPUT_URL="s3://mybucket/output.parquet" \
-         SQL_FILTER="SELECT * FROM data WHERE column > 100"
-
-# Watch for changes and rebuild
-make watch
-```
-
-## Docker
-
-```bash
-# Build Docker image
-make build
-
-# Push to registry
-make push
-
-# Build with custom tag
-make build IMAGE_TAG=custom-tag
-```
-
-## Kubernetes Deployment
-
-### Prerequisites
-1. A running Kubernetes cluster
-2. Argo Workflows installed
-3. kubectl configured with cluster access
-4. Docker registry access
-
-### Deployment Steps
-
-1. Deploy to Kubernetes:
-```bash
-# Deploy with default configuration
-make k8s-deploy
-
-# Deploy with custom parameters
-make k8s-deploy \
-    INPUT_URL="s3://mybucket/input.parquet" \
-    OUTPUT_URL="s3://mybucket/output.parquet" \
-    SQL_FILTER="SELECT * FROM data WHERE column > 100" \
-    K8S_NAMESPACE="my-namespace"
-```
-
-2. Delete deployment:
-```bash
-make k8s-delete
-```
-
-## Storage Backend URLs
-
-The application supports different storage backends through URLs:
-
-- Local storage: `file:///path/to/file.parquet`
-- S3 storage: `s3://bucket-name/path/to/file.parquet`
-- Azure storage: `azure://container-name/path/to/file.parquet`
-
-## Makefile Commands
-
-Run `make help` to see all available commands:
-
-- `make all`: Build and test everything
-- `make build`: Build the Docker image
-- `make push`: Push the Docker image to registry
-- `make run`: Run locally
-- `make test`: Run all tests
-- `make clean`: Clean build artifacts
-- `make fmt`: Format Rust code
-- `make lint`: Run clippy lints
-- `make coverage`: Generate test coverage report
-- `make k8s-deploy`: Deploy to Kubernetes
-- `make k8s-delete`: Delete Kubernetes resources
-- `make version`: Display version information
-- `make watch`: Watch for file changes and rebuild
-
-## Weather Data Processing Workflow
-
-This section describes how to use the application for processing weather data stored in Parquet format.
-
-### Data Processing Pipeline
-
-The application implements a data processing pipeline that:
-1. Reads Parquet files from S3
-2. Applies SQL filters using DataFusion
-3. Displays results in the terminal
-4. Optionally writes filtered results back to S3
-
-### Usage Example
-
-```bash
-# Basic usage with SQL filter
-cargo run -- \
-  --input-url "s3://your-bucket/weather.parquet" \
-  --output-url "s3://your-bucket/filtered_weather.parquet" \
-  --sql-filter "SELECT * FROM data LIMIT 10"
-```
-
-### Features
-
-- **SQL Filtering**: Apply SQL queries to filter and transform your data
-- **Pretty Printing**: Displays data in a formatted table in the terminal
-- **Storage Support**: Works with both local filesystem and S3 storage
-- **Asynchronous Processing**: Efficient handling of I/O operations
-
-### Example SQL Queries
-
-```sql
--- Display first 10 rows
-SELECT * FROM data LIMIT 10
-
--- Filter by specific conditions
-SELECT * FROM data WHERE temperature > 25
-
--- Aggregate data
-SELECT AVG(temperature) as avg_temp, 
-       MAX(temperature) as max_temp,
-       MIN(temperature) as min_temp 
-FROM data
-```
-
-### Error Handling
-
-The application provides detailed error messages for common issues:
-- S3 connectivity problems
-- Invalid SQL queries
-- File access permissions
-- Data format inconsistencies
-
-## Troubleshooting
-
-### Common Issues
-
-1. **AWS Credentials**
-   - Ensure AWS credentials are properly set in `.env`
-   - Verify AWS CLI configuration
-   - Check S3 bucket permissions
-
-2. **Azure Storage**
-   - Verify Azure credentials in `.env`
-   - Check container permissions
-   - Ensure Azure CLI is configured
-
-3. **Kubernetes Deployment**
-   - Verify cluster access: `kubectl cluster-info`
-   - Check pod logs: `kubectl logs -n <namespace> <pod-name>`
-   - Verify Argo workflow status: `argo list -n <namespace>`
-
-### Logs
-
-- Application logs: Available through `kubectl logs` or Argo UI
-- Test logs: Use `RUST_LOG=debug` for verbose logging
-- Build logs: Check Docker build output
+### Storage
+- Configure buffer sizes for I/O
+- Set appropriate retry policies
+- Limit concurrent requests
