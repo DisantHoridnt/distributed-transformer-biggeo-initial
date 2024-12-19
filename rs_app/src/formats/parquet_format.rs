@@ -1,94 +1,80 @@
 use anyhow::Result;
-use arrow::array::RecordBatch;
+use arrow::array::RecordBatchReader;
 use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
-use futures::TryStreamExt;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parquet::arrow::ArrowWriter;
-use parquet::basic::{Compression, BrotliLevel, GzipLevel, ZstdLevel};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
+use parquet::arrow::arrow_writer::ArrowWriter;
+use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use std::io::Cursor;
 
-use crate::formats::{DataFormat, SchemaInference, BoxStream};
-use crate::config::ParquetConfig;
+use super::DataFormat;
 
-#[derive(Default)]
-pub struct ParquetFormat {
-    pub compression: String,
+#[derive(Debug, Clone)]
+pub struct ParquetConfig {
+    pub compression: Compression,
     pub batch_size: usize,
+}
+
+impl Default for ParquetConfig {
+    fn default() -> Self {
+        Self {
+            compression: Compression::SNAPPY,
+            batch_size: 1024,
+        }
+    }
+}
+
+pub struct ParquetFormat {
+    config: ParquetConfig,
 }
 
 impl ParquetFormat {
     pub fn new(config: &ParquetConfig) -> Self {
         Self {
-            compression: config.compression.clone(),
-            batch_size: config.batch_size,
+            config: config.clone(),
         }
     }
 }
 
-#[async_trait::async_trait]
-impl SchemaInference for ParquetFormat {
-    async fn infer_schema(&self, data: &[u8]) -> Result<SchemaRef> {
-        let bytes = Bytes::copy_from_slice(data);
-        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)?;
-        Ok(reader.schema().clone())
+impl Default for ParquetFormat {
+    fn default() -> Self {
+        Self {
+            config: ParquetConfig::default(),
+        }
     }
 }
 
-#[async_trait::async_trait]
 impl DataFormat for ParquetFormat {
-    async fn read_batches_from_stream(
-        &self,
-        _schema: SchemaRef,
-        mut stream: BoxStream<'static, Result<Bytes>>,
-    ) -> Result<BoxStream<'static, Result<RecordBatch>>> {
-        let mut batches = Vec::new();
-        
-        while let Some(data) = stream.try_next().await? {
-            let reader = ParquetRecordBatchReaderBuilder::try_new(data)?
-                .with_batch_size(self.batch_size)
-                .build()?;
-
-            for batch in reader {
-                batches.push(batch?);
-            }
-        }
-        
-        Ok(Box::pin(futures::stream::iter(batches.into_iter().map(Ok))))
+    fn read_batch(&self, data: &Bytes) -> Result<RecordBatch> {
+        let mut reader = ParquetRecordBatchReader::try_new(data.clone(), self.config.batch_size)?;
+        let batch = reader
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No data in Parquet"))??;
+        Ok(batch)
     }
 
-    async fn write_batches(
-        &self,
-        mut batches: BoxStream<'static, Result<RecordBatch>>,
-    ) -> Result<Bytes> {
-        let mut all_batches = Vec::new();
-        while let Some(batch) = batches.try_next().await? {
-            all_batches.push(batch);
+    fn write_batch(&self, batch: &RecordBatch) -> Result<Bytes> {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let props = WriterProperties::builder()
+                .set_compression(self.config.compression)
+                .build();
+
+            let mut writer = ArrowWriter::try_new(
+                &mut cursor,
+                batch.schema(),
+                Some(props),
+            )?;
+            writer.write(batch)?;
+            writer.close()?;
         }
+        Ok(Bytes::from(cursor.into_inner()))
+    }
 
-        if all_batches.is_empty() {
-            return Ok(Bytes::new());
-        }
-
-        let schema = all_batches[0].schema();
-        let mut buf = Vec::new();
-
-        let props = WriterProperties::builder()
-            .set_compression(match self.compression.as_str() {
-                "brotli" => Compression::BROTLI(BrotliLevel::default()),
-                "gzip" => Compression::GZIP(GzipLevel::default()),
-                "zstd" => Compression::ZSTD(ZstdLevel::default()),
-                _ => Compression::UNCOMPRESSED,
-            })
-            .build();
-
-        let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))?;
-
-        for batch in all_batches {
-            writer.write(&batch)?;
-        }
-
-        writer.close()?;
-        Ok(Bytes::from(buf))
+    fn infer_schema(&self, data: &Bytes) -> Result<SchemaRef> {
+        let reader = ParquetRecordBatchReader::try_new(data.clone(), self.config.batch_size)?;
+        Ok(reader.schema().clone())
     }
 }

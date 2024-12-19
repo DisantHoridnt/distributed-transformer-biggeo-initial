@@ -1,129 +1,118 @@
-use std::sync::Arc;
 use anyhow::Result;
-use clap::Parser;
-use datafusion::prelude::*;
+use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
+use clap::{Parser, Subcommand};
 use futures::StreamExt;
+use std::pin::Pin;
+use std::sync::Arc;
 use url::Url;
 
-mod config;
+use crate::formats::csv_format::{CsvConfig, CsvFormat};
+use crate::formats::parquet_format::{ParquetConfig, ParquetFormat};
+use crate::formats::DataFormat;
+use crate::storage::azure::AzureStorage;
+use crate::storage::local::LocalStorage;
+use crate::storage::s3::S3Storage;
+use crate::table_provider::FormatTableProvider;
+
 mod formats;
 mod storage;
 mod table_provider;
+mod execution;
 
-use config::Config;
-use formats::{CsvFormat, DataFormat, ParquetFormat};
-use storage::Storage;
-use table_provider::FormatTableProvider;
-
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(author, version, about, long_about = None)]
-struct Args {
-    /// Input URL (e.g., file:///path/to/input.csv, s3://bucket/input.csv)
-    #[arg(short, long)]
-    input_url: String,
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// Output URL (e.g., file:///path/to/output.parquet, s3://bucket/output.parquet)
-    #[arg(short, long)]
-    output_url: String,
+#[derive(Subcommand)]
+enum Commands {
+    Convert {
+        #[arg(short, long)]
+        input: String,
+        #[arg(short, long)]
+        output: String,
+    },
+}
 
-    /// Input format (csv or parquet)
-    #[arg(long, default_value = "auto")]
-    input_format: String,
+async fn get_storage_for_url(url: &Url) -> Result<Box<dyn storage::Storage>> {
+    match url.scheme() {
+        "s3" => Ok(Box::new(S3Storage::new(url.host_str().unwrap().to_string())?)),
+        "azure" => Ok(Box::new(AzureStorage::new(url.host_str().unwrap().to_string())?)),
+        "file" | _ => Ok(Box::new(LocalStorage::new()?)),
+    }
+}
 
-    /// Output format (csv or parquet)
-    #[arg(long, default_value = "auto")]
-    output_format: String,
+async fn get_format_for_url(url: &Url) -> Result<Box<dyn DataFormat + Send + Sync>> {
+    let path = url.path();
+    match path.split('.').last() {
+        Some("csv") => Ok(Box::new(CsvFormat::new(&CsvConfig::default()))),
+        Some("parquet") => Ok(Box::new(ParquetFormat::new(&ParquetConfig::default()))),
+        _ => Err(anyhow::anyhow!("Unsupported file format")),
+    }
+}
 
-    /// Batch size for processing
-    #[arg(long)]
-    batch_size: Option<usize>,
+async fn convert(input: &str, output: &str) -> Result<()> {
+    // Parse URLs
+    let input_url = Url::parse(input)?;
+    let output_url = Url::parse(output)?;
 
-    /// CSV has header
-    #[arg(long)]
-    has_header: Option<bool>,
+    // Get storage implementations
+    let input_storage = get_storage_for_url(&input_url).await?;
+    let output_storage = get_storage_for_url(&output_url).await?;
 
-    /// CSV delimiter
-    #[arg(long, default_value = ",")]
-    delimiter: String,
+    // Get format implementations
+    let input_format = get_format_for_url(&input_url).await?;
+    let output_format = get_format_for_url(&output_url).await?;
 
-    /// Parquet compression (uncompressed, snappy, gzip, brotli, zstd)
-    #[arg(long, default_value = "snappy")]
-    compression: String,
+    // Read input data
+    let input_data = input_storage.read(&input_url).await?;
 
-    /// Config file path
-    #[arg(short, long)]
-    config: Option<String>,
+    // Convert to record batches
+    let mut input_stream = Box::pin(input_data.map(|result| {
+        result.and_then(|bytes| {
+            input_format
+                .read_batch(&bytes)
+                .map_err(|e| anyhow::anyhow!("Error reading input: {}", e))
+        })
+    }));
+
+    // Get schema from first batch
+    let first_batch = input_stream
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("No data in input"))??;
+    let schema: SchemaRef = first_batch.schema();
+
+    // Create a new stream that includes the first batch
+    let input_stream = Box::pin(futures::stream::once(futures::future::ready(Ok(first_batch))));
+
+    // Create table provider
+    let provider = FormatTableProvider::new(input_format, schema.clone(), Box::pin(input_stream));
+
+    // Execute the query
+    let ctx = datafusion::execution::context::SessionContext::new();
+    let df = ctx.read_table(Arc::new(provider))?;
+    let batches = df.collect().await?;
+
+    // Write output
+    for batch in batches {
+        let output_data = output_format.write_batch(&batch)?;
+        output_storage.write(&output_url, output_data).await?;
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
-    
-    let mut config = Config::default();
-    if let Some(config_path) = args.config {
-        config = Config::from_file(config_path)?;
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Convert { input, output } => convert(&input, &output).await?,
     }
-
-    // Update config with command line arguments
-    if let Some(batch_size) = args.batch_size {
-        config.formats.csv.batch_size = batch_size;
-        config.formats.parquet.batch_size = batch_size;
-    }
-
-    if let Some(has_header) = args.has_header {
-        config.formats.csv.has_header = has_header;
-    }
-
-    let input_url = Url::parse(&args.input_url)?;
-    let output_url = Url::parse(&args.output_url)?;
-
-    let input_format = if args.input_format == "auto" {
-        match input_url.path().split('.').last() {
-            Some("csv") => "csv",
-            Some("parquet") => "parquet",
-            _ => return Err(anyhow::anyhow!("Could not determine input format")),
-        }
-    } else {
-        &args.input_format
-    };
-
-    let output_format = if args.output_format == "auto" {
-        match output_url.path().split('.').last() {
-            Some("csv") => "csv",
-            Some("parquet") => "parquet",
-            _ => return Err(anyhow::anyhow!("Could not determine output format")),
-        }
-    } else {
-        &args.output_format
-    };
-
-    let input_format: Box<dyn DataFormat + Send + Sync> = match input_format {
-        "csv" => Box::new(CsvFormat::new(&config.formats.csv)),
-        "parquet" => Box::new(ParquetFormat::new(&config.formats.parquet)),
-        _ => return Err(anyhow::anyhow!("Unsupported input format")),
-    };
-
-    let output_format: Box<dyn DataFormat + Send + Sync> = match output_format {
-        "csv" => Box::new(CsvFormat::new(&config.formats.csv)),
-        "parquet" => Box::new(ParquetFormat::new(&config.formats.parquet)),
-        _ => return Err(anyhow::anyhow!("Unsupported output format")),
-    };
-
-    let storage = Arc::new(storage::from_url(&input_url)?);
-    let input_stream = storage.read(&input_url).await?;
-    let schema = input_format.infer_schema(&storage.read_all(&input_url).await?).await?;
-
-    let provider = FormatTableProvider::new(input_format, schema.clone(), input_stream);
-    let ctx = SessionContext::new();
-    ctx.register_table("input", Arc::new(provider))?;
-
-    let df = ctx.table("input").await?;
-    let batches = df.collect().await?;
-
-    let output_storage = Arc::new(storage::from_url(&output_url)?);
-    let output_stream = futures::stream::iter(batches.into_iter().map(Ok));
-    let output_bytes = output_format.write_batches(Box::pin(output_stream)).await?;
-    output_storage.write(&output_url, output_bytes).await?;
 
     Ok(())
 }

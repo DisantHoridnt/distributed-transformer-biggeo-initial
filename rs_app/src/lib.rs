@@ -7,7 +7,7 @@ pub mod plugin;
 
 // Re-export key traits and types
 pub use config::Config;
-pub use formats::{CsvFormat, DataFormat, ParquetFormat, SchemaInference};
+pub use formats::{CsvFormat, CsvConfig, DataFormat, ParquetFormat, ParquetConfig};
 pub use plugin::{FormatPlugin, PluginMetadata, PluginManager};
 pub use storage::Storage;
 pub use table_provider::FormatTableProvider;

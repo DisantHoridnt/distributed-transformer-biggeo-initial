@@ -5,7 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use object_store::local::LocalFileSystem;
 use object_store::{ObjectStore, path::Path as ObjectPath};
 use tokio::fs;
@@ -46,10 +46,9 @@ impl super::Storage for LocalStorage {
     async fn read(&self, url: &Url) -> Result<Box<dyn Stream<Item = Result<Bytes, anyhow::Error>> + Send + Sync + Unpin + 'static>> {
         let path = self.get_object_path(url)?;
         let result = self.store.get(&path).await?;
-        let stream = futures::stream::once(async move { result.bytes().await })
-            .map_err(anyhow::Error::from)
-            .map_ok(|bytes| bytes);
-        Ok(Box::new(stream))
+        let bytes = result.bytes().await?;
+        let stream = futures::stream::once(futures::future::ready(Ok(bytes)));
+        Ok(Box::new(Box::pin(stream)))
     }
 
     async fn read_all(&self, url: &Url) -> Result<Bytes> {

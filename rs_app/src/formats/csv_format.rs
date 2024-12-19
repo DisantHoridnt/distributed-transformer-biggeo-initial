@@ -1,97 +1,93 @@
+use anyhow::Result;
+use arrow::csv::{ReaderBuilder, WriterBuilder};
+use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
 use std::io::Cursor;
 use std::sync::Arc;
 
-use anyhow::Result;
-use arrow::array::RecordBatch;
-use arrow::csv::{ReaderBuilder, WriterBuilder};
-use arrow::datatypes::SchemaRef;
-use bytes::Bytes;
-use futures::TryStreamExt;
+use super::DataFormat;
 
-use crate::formats::{DataFormat, SchemaInference, BoxStream};
-use crate::config::CsvConfig;
-
-#[derive(Default)]
-pub struct CsvFormat {
+#[derive(Debug, Clone)]
+pub struct CsvConfig {
     pub has_header: bool,
     pub delimiter: u8,
     pub batch_size: usize,
 }
 
+impl Default for CsvConfig {
+    fn default() -> Self {
+        Self {
+            has_header: true,
+            delimiter: b',',
+            batch_size: 1024,
+        }
+    }
+}
+
+pub struct CsvFormat {
+    config: CsvConfig,
+}
+
 impl CsvFormat {
     pub fn new(config: &CsvConfig) -> Self {
         Self {
-            has_header: config.has_header,
-            delimiter: config.delimiter as u8,
-            batch_size: config.batch_size,
+            config: config.clone(),
         }
     }
 }
 
-#[async_trait::async_trait]
-impl SchemaInference for CsvFormat {
-    async fn infer_schema(&self, data: &[u8]) -> Result<SchemaRef> {
+impl Default for CsvFormat {
+    fn default() -> Self {
+        Self {
+            config: CsvConfig::default(),
+        }
+    }
+}
+
+impl DataFormat for CsvFormat {
+    fn read_batch(&self, data: &Bytes) -> Result<RecordBatch> {
         let cursor = Cursor::new(data);
         let (schema, _) = arrow::csv::reader::infer_reader_schema(
             cursor,
-            self.delimiter,
-            Some(1024),
-            self.has_header,
+            self.config.delimiter,
+            Some(self.config.batch_size),
+            self.config.has_header,
+        )?;
+
+        let cursor = Cursor::new(data);
+        let mut reader = ReaderBuilder::new(Arc::new(schema))
+            .has_header(self.config.has_header)
+            .with_delimiter(self.config.delimiter)
+            .with_batch_size(self.config.batch_size)
+            .build(cursor)?;
+
+        let batch = reader
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No data in CSV"))??;
+        Ok(batch)
+    }
+
+    fn write_batch(&self, batch: &RecordBatch) -> Result<Bytes> {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = WriterBuilder::new()
+                .has_headers(self.config.has_header)
+                .with_delimiter(self.config.delimiter)
+                .build(&mut cursor);
+            writer.write(batch)?;
+        }
+        Ok(Bytes::from(cursor.into_inner()))
+    }
+
+    fn infer_schema(&self, data: &Bytes) -> Result<SchemaRef> {
+        let cursor = Cursor::new(data);
+        let (schema, _) = arrow::csv::reader::infer_reader_schema(
+            cursor,
+            self.config.delimiter,
+            Some(self.config.batch_size),
+            self.config.has_header,
         )?;
         Ok(Arc::new(schema))
-    }
-}
-
-#[async_trait::async_trait]
-impl DataFormat for CsvFormat {
-    async fn read_batches_from_stream(
-        &self,
-        schema: SchemaRef,
-        mut stream: BoxStream<'static, Result<Bytes>>,
-    ) -> Result<BoxStream<'static, Result<RecordBatch>>> {
-        let mut batches = Vec::new();
-        
-        while let Some(data) = stream.try_next().await? {
-            let cursor = Cursor::new(data);
-            let mut reader = ReaderBuilder::new(schema.clone())
-                .has_header(self.has_header)
-                .with_delimiter(self.delimiter)
-                .with_batch_size(self.batch_size)
-                .build(cursor)?;
-
-            while let Some(batch) = reader.next() {
-                batches.push(batch?);
-            }
-        }
-
-        Ok(Box::pin(futures::stream::iter(batches.into_iter().map(Ok))))
-    }
-
-    async fn write_batches(
-        &self,
-        mut batches: BoxStream<'static, Result<RecordBatch>>,
-    ) -> Result<Bytes> {
-        let mut all_batches = Vec::new();
-        while let Some(batch) = batches.try_next().await? {
-            all_batches.push(batch);
-        }
-
-        if all_batches.is_empty() {
-            return Ok(Bytes::new());
-        }
-
-        let schema = all_batches[0].schema();
-        let mut buf = Vec::new();
-        let mut writer = WriterBuilder::new()
-            .has_headers(self.has_header)
-            .with_delimiter(self.delimiter)
-            .build(&mut buf);
-
-        for batch in all_batches {
-            writer.write(&batch)?;
-        }
-        drop(writer);
-
-        Ok(Bytes::from(buf))
     }
 }
