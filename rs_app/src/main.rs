@@ -12,7 +12,9 @@ use tokio;
 use url::Url;
 
 mod storage;
+mod formats;
 use storage::Storage;
+use formats::{DataFormat, ParquetFormat};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -27,15 +29,21 @@ struct Args {
     filter_sql: Option<String>,
 }
 
-async fn read_parquet_file(storage: Arc<dyn Storage>, url: &Url) -> Result<Vec<RecordBatch>> {
+async fn read_file(storage: Arc<dyn Storage>, url: &Url) -> Result<Vec<RecordBatch>> {
     let path = url.path();
     let data = storage.get(path).await?;
-    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(data, 1024)?;
     
-    let mut batches = Vec::new();
-    for batch in reader {
-        batches.push(batch?);
-    }
+    // Get the format based on file extension
+    let ext = url.path()
+        .split('.')
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("No file extension found"))?;
+        
+    let format = formats::get_format_for_extension(ext)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported file format: {}", ext))?;
+    
+    let stream = format.read_batches(data).await?;
+    let batches = stream.try_collect().await?;
     
     Ok(batches)
 }
@@ -53,21 +61,20 @@ async fn apply_sql_filter(batches: Vec<RecordBatch>, sql: &str) -> Result<Vec<Re
     Ok(results)
 }
 
-async fn write_parquet_file(storage: Arc<dyn Storage>, url: &Url, batches: Vec<RecordBatch>) -> Result<()> {
-    let schema = batches[0].schema();
-    let mut buf = Vec::new();
-    {
-        let mut writer = parquet::arrow::ArrowWriter::try_new(&mut buf, schema, None)?;
-
-        for batch in batches {
-            writer.write(&batch)?;
-        }
-
-        writer.close()?;
-    }
+async fn write_file(storage: Arc<dyn Storage>, url: &Url, batches: Vec<RecordBatch>) -> Result<()> {
+    let ext = url.path()
+        .split('.')
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("No file extension found"))?;
+        
+    let format = formats::get_format_for_extension(ext)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported file format: {}", ext))?;
+    
+    let stream = futures::stream::iter(batches.into_iter().map(Ok));
+    let data = format.write_batches(Box::pin(stream)).await?;
     
     let path = url.path();
-    storage.put(path, Bytes::from(buf)).await?;
+    storage.put(path, data).await?;
     Ok(())
 }
 
@@ -83,7 +90,7 @@ async fn main() -> Result<()> {
     let storage = storage::from_url(&input_url).await?;
     
     // Read input file
-    let mut batches = read_parquet_file(storage.clone(), &input_url).await?;
+    let mut batches = read_file(storage.clone(), &input_url).await?;
     
     println!("\nInput data sample:");
     print_batches(&batches)?;
@@ -98,7 +105,7 @@ async fn main() -> Result<()> {
     }
     
     // Write output file
-    write_parquet_file(storage, &output_url, batches).await?;
+    write_file(storage, &output_url, batches).await?;
     println!("\nOutput written to: {}", output_url);
     
     Ok(())
