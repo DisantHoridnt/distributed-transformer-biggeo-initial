@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use arrow::record_batch::RecordBatch;
+use arrow::datatypes::SchemaRef;
 use futures::stream::BoxStream;
 use anyhow::Result;
 use bytes::Bytes;
@@ -11,10 +12,27 @@ pub use parquet_format::ParquetFormat;
 pub use csv_format::CsvFormat;
 
 #[async_trait]
-pub trait DataFormat: Send + Sync {
+pub trait SchemaInference {
+    /// Infer schema from a data sample
+    async fn infer_schema(&self, data: &[u8]) -> Result<SchemaRef>;
+    
+    /// Validate that a batch conforms to the expected schema
+    fn validate_schema(&self, schema: &SchemaRef, batch: &RecordBatch) -> Result<()> {
+        if batch.schema() != *schema {
+            return Err(anyhow::anyhow!(
+                "Schema mismatch. Expected: {:?}, Got: {:?}",
+                schema,
+                batch.schema()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+pub trait DataFormat: Send + Sync + SchemaInference {
     async fn read_batches(&self, data: Bytes) -> Result<BoxStream<'static, Result<RecordBatch>>>;
     async fn write_batches(&self, batches: BoxStream<'static, Result<RecordBatch>>) -> Result<Bytes>;
-    
     fn clone_box(&self) -> Box<dyn DataFormat + Send + Sync>;
 }
 
