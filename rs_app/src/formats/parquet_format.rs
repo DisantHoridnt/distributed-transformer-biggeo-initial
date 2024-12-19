@@ -7,6 +7,7 @@ use futures::stream::{BoxStream, StreamExt};
 use std::io::Cursor;
 use futures::stream;
 
+#[derive(Clone)]
 pub struct ParquetFormat;
 
 #[async_trait]
@@ -46,5 +47,9 @@ impl DataFormat for ParquetFormat {
         }
         
         Ok(Bytes::from(buf))
+    }
+    
+    fn clone_box(&self) -> Box<dyn DataFormat + Send + Sync> {
+        Box::new(self.clone())
     }
 }

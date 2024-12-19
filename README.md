@@ -1,6 +1,177 @@
 # Distributed Transformer
 
-A distributed ETL pipeline for transforming large datasets using Rust, with support for multiple storage backends (Local, S3, Azure).
+A high-performance, streaming ETL system built in Rust that supports multiple storage backends and file formats.
+
+## Architecture
+
+### Format-Agnostic Data Processing
+
+The system is built around a flexible, trait-based architecture that enables format-agnostic data processing:
+
+```rust
+#[async_trait]
+pub trait DataFormat: Send + Sync {
+    async fn read_batches(&self, data: Bytes) -> Result<BoxStream<'static, Result<RecordBatch>>>;
+    async fn write_batches(&self, batches: BoxStream<'static, Result<RecordBatch>>) -> Result<Bytes>;
+    fn clone_box(&self) -> Box<dyn DataFormat + Send + Sync>;
+}
+```
+
+#### Supported Formats
+
+1. **Parquet Format**
+   - Full streaming support for reading and writing
+   - Integration with Arrow's Parquet implementation
+   - Efficient columnar storage and compression
+
+2. **CSV Format**
+   - Automatic schema inference with type detection
+   - Configurable options:
+     - Header row handling
+     - Batch size for streaming
+     - Custom delimiters (planned)
+   - Type conversion and validation
+
+### DataFusion Integration
+
+The system integrates deeply with DataFusion for efficient query processing:
+
+1. **Custom Table Provider**
+   ```rust
+   pub struct FormatTableProvider {
+       format: Box<dyn DataFormat + Send + Sync>,
+       storage: Arc<dyn Storage>,
+       data: Option<Bytes>,
+       schema: SchemaRef,
+   }
+   ```
+
+2. **Streaming Execution Engine**
+   - Custom `ExecutionPlan` implementation
+   - Lazy evaluation of data
+   - Push-down optimization support
+
+### Key Features
+
+1. **Streaming Processing**
+   - Memory-efficient handling of large datasets
+   - Asynchronous I/O throughout the pipeline
+   - Backpressure support via Rust's Stream trait
+
+2. **Query Optimization**
+   - Predicate pushdown
+   - Column projection
+   - Lazy evaluation of queries
+
+3. **Format Registry**
+   - Dynamic format selection based on file extensions
+   - Extensible architecture for adding new formats
+   ```rust
+   lazy_static! {
+       static ref FORMAT_REGISTRY: HashMap<&'static str, FormatFactory> = {
+           let mut m = HashMap::new();
+           m.insert("parquet", || Box::new(ParquetFormat));
+           m.insert("csv", || Box::new(CsvFormat::new(true, 1024)));
+           m
+       };
+   }
+   ```
+
+4. **Storage Abstraction**
+   - Support for multiple storage backends
+   - Async I/O operations
+   - Streaming data transfer
+
+## Usage
+
+### Basic Example
+
+```rust
+let input_url = "s3://bucket/data.csv";
+let output_url = "s3://bucket/output.parquet";
+
+// Process data with SQL transformation
+process_data(
+    storage,
+    &input_url,
+    &output_url,
+    Some("SELECT * FROM data WHERE age > 25")
+).await?;
+```
+
+### Format-Specific Features
+
+#### Parquet
+- Efficient columnar storage
+- Compression support
+- Schema preservation
+- Predicate pushdown support
+
+#### CSV
+- Automatic schema inference
+- Header row support
+- Type detection for:
+  - Integer (i64)
+  - Float (f64)
+  - String (Utf8)
+- Configurable batch size for memory control
+
+## Implementation Details
+
+### Execution Pipeline
+
+1. **Format Detection**
+   - File extension based format selection
+   - Dynamic format instantiation
+
+2. **Schema Management**
+   - Automatic schema inference for schemaless formats
+   - Schema validation and preservation
+   - Type conversion handling
+
+3. **Query Execution**
+   - Custom `ExecutionPlan` for streaming
+   - Integration with DataFusion's query optimizer
+   - Predicate and projection pushdown
+
+4. **Memory Management**
+   - Streaming-first architecture
+   - Batch-based processing
+   - Configurable batch sizes
+
+### Performance Optimizations
+
+1. **Lazy Evaluation**
+   - Data is only read when needed
+   - Query predicates are pushed down
+   - Column projection minimizes I/O
+
+2. **Streaming Processing**
+   - Constant memory usage regardless of data size
+   - Backpressure support
+   - Asynchronous I/O
+
+3. **Resource Management**
+   - Connection pooling for storage backends
+   - Batch size tuning
+   - Async task management
+
+## Future Enhancements
+
+1. **Format Support**
+   - JSON format implementation
+   - Arrow IPC format
+   - Custom format plugins
+
+2. **Query Optimization**
+   - Advanced predicate pushdown
+   - Statistics-based optimization
+   - Parallel query execution
+
+3. **Configuration**
+   - Format-specific configuration
+   - Performance tuning parameters
+   - Resource limits
 
 ## Prerequisites
 
