@@ -9,11 +9,21 @@ use parquet::basic::{Compression, BrotliLevel, GzipLevel, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 
 use crate::formats::{DataFormat, SchemaInference, BoxStream};
+use crate::config::ParquetConfig;
 
 #[derive(Default)]
 pub struct ParquetFormat {
     pub compression: String,
     pub batch_size: usize,
+}
+
+impl ParquetFormat {
+    pub fn new(config: &ParquetConfig) -> Self {
+        Self {
+            compression: config.compression.clone(),
+            batch_size: config.batch_size,
+        }
+    }
 }
 
 #[async_trait::async_trait]

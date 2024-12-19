@@ -9,12 +9,23 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 
 use crate::formats::{DataFormat, SchemaInference, BoxStream};
+use crate::config::CsvConfig;
 
 #[derive(Default)]
 pub struct CsvFormat {
     pub has_header: bool,
     pub delimiter: u8,
     pub batch_size: usize,
+}
+
+impl CsvFormat {
+    pub fn new(config: &CsvConfig) -> Self {
+        Self {
+            has_header: config.has_header,
+            delimiter: config.delimiter as u8,
+            batch_size: config.batch_size,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -52,7 +63,7 @@ impl DataFormat for CsvFormat {
                 batches.push(batch?);
             }
         }
-        
+
         Ok(Box::pin(futures::stream::iter(batches.into_iter().map(Ok))))
     }
 
@@ -69,6 +80,7 @@ impl DataFormat for CsvFormat {
             return Ok(Bytes::new());
         }
 
+        let schema = all_batches[0].schema();
         let mut buf = Vec::new();
         let mut writer = WriterBuilder::new()
             .has_headers(self.has_header)

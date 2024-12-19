@@ -35,7 +35,7 @@ pub struct CsvConfig {
     /// Default batch size for reading
     pub batch_size: usize,
     /// Whether to assume header row by default
-    pub default_has_header: bool,
+    pub has_header: bool,
     /// Number of rows to sample for schema inference
     pub schema_sample_size: usize,
     /// Maximum sample size in bytes
@@ -51,44 +51,40 @@ pub struct CsvConfig {
 pub struct ParquetConfig {
     /// Default batch size for reading
     pub batch_size: usize,
-    /// Whether to use statistics for optimization
-    pub use_statistics: bool,
-    /// Row group size for writing
-    pub row_group_size: usize,
-    /// Compression codec
+    /// Default compression type (uncompressed, snappy, gzip, brotli, zstd)
     pub compression: String,
-    /// Page size in bytes
-    pub page_size: usize,
-    /// Dictionary page size in bytes
-    pub dictionary_page_size: usize,
+    /// Number of rows to sample for schema inference
+    pub schema_sample_size: usize,
+    /// Maximum sample size in bytes
+    pub max_sample_bytes: usize,
 }
 
 /// Default configuration for unknown formats
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DefaultFormatConfig {
-    /// Default batch size
+    /// Default batch size for reading
     pub batch_size: usize,
-    /// Default sample size for schema inference
+    /// Number of rows to sample for schema inference
     pub schema_sample_size: usize,
+    /// Maximum sample size in bytes
+    pub max_sample_bytes: usize,
 }
 
 /// Plugin system configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginConfig {
-    /// Directory to load plugins from
-    pub plugin_dir: Option<PathBuf>,
-    /// Whether to enable plugin loading
-    pub enable_plugins: bool,
-    /// Plugin-specific configurations
-    pub plugin_configs: HashMap<String, serde_json::Value>,
-    /// Plugin load timeout in seconds
-    pub load_timeout_secs: u64,
-    /// Enable hot reloading of plugins
-    pub enable_hot_reload: bool,
-    /// Hot reload check interval in seconds
-    pub hot_reload_interval_secs: u64,
+    /// Directory containing plugins
+    pub directory: PathBuf,
     /// Plugin version compatibility mode
     pub version_compatibility: VersionCompatibility,
+    /// Whether to load plugins in isolated processes
+    pub isolated_loading: bool,
+    /// Maximum number of concurrent plugin instances
+    pub max_instances: usize,
+    /// Plugin-specific configuration
+    pub plugin_configs: HashMap<String, serde_json::Value>,
+    /// Default timeout for plugin operations in seconds
+    pub default_timeout: u64,
 }
 
 /// Version compatibility modes for plugins
@@ -96,9 +92,9 @@ pub struct PluginConfig {
 pub enum VersionCompatibility {
     /// Only load exact version matches
     Exact,
-    /// Load compatible major versions
+    /// Load plugins with compatible major version
     Major,
-    /// Load compatible major and minor versions
+    /// Load plugins with compatible major and minor version
     Minor,
     /// Load any version (not recommended)
     Any,
@@ -109,12 +105,8 @@ pub enum VersionCompatibility {
 pub struct StorageConfig {
     /// S3 configuration
     pub s3: S3Config,
-    /// Buffer size for streaming reads
-    pub read_buffer_size: usize,
-    /// Buffer size for streaming writes
-    pub write_buffer_size: usize,
-    /// Maximum concurrent requests
-    pub max_concurrent_requests: usize,
+    /// Local storage configuration
+    pub local_path: PathBuf,
     /// Retry configuration
     pub retry: RetryConfig,
 }
@@ -122,14 +114,12 @@ pub struct StorageConfig {
 /// S3 configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3Config {
-    /// Region
+    /// AWS region
     pub region: String,
-    /// Bucket
+    /// S3 endpoint URL (optional)
+    pub endpoint: Option<String>,
+    /// Default bucket
     pub bucket: String,
-    /// Access key ID
-    pub access_key_id: String,
-    /// Secret access key
-    pub secret_access_key: String,
 }
 
 /// Retry configuration for storage operations
@@ -141,101 +131,85 @@ pub struct RetryConfig {
     pub initial_delay_ms: u64,
     /// Maximum retry delay in milliseconds
     pub max_delay_ms: u64,
-    /// Retry backoff multiplier
-    pub backoff_multiplier: f64,
 }
 
 /// Streaming configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamingConfig {
-    /// Maximum buffer memory per stream
-    pub max_buffer_memory: usize,
-    /// Number of buffers to pre-allocate
-    pub buffer_pool_size: usize,
-    /// Stream read timeout in seconds
-    pub read_timeout_secs: u64,
-    /// Stream write timeout in seconds
-    pub write_timeout_secs: u64,
-    /// Enable backpressure mechanisms
-    pub enable_backpressure: bool,
-    /// Maximum in-flight batches per stream
-    pub max_in_flight_batches: usize,
+    /// Maximum number of concurrent streams
+    pub max_concurrent_streams: usize,
+    /// Stream buffer size in bytes
+    pub buffer_size: usize,
+    /// Stream timeout in seconds
+    pub timeout: u64,
+    /// Whether to use compression for streaming
+    pub use_compression: bool,
 }
 
 /// Data processing configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessingConfig {
-    /// Maximum memory usage per operation
-    pub max_memory_bytes: usize,
-    /// Whether to use memory mapping
-    pub use_memory_mapping: bool,
-    /// Number of threads for parallel processing
-    pub parallel_threads: usize,
+    /// Number of worker threads
+    pub num_threads: usize,
+    /// Memory limit per thread in bytes
+    pub memory_limit: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
+        let num_cpus = num_cpus::get();
         Self {
             formats: FormatConfig {
                 csv: CsvConfig {
                     batch_size: 1024,
-                    default_has_header: true,
+                    has_header: true,
                     schema_sample_size: 1000,
-                    max_sample_bytes: 1024 * 1024, // 1MB
+                    max_sample_bytes: 1024 * 1024,
                     delimiter: ',',
                     quote: '"',
                 },
                 parquet: ParquetConfig {
                     batch_size: 1024,
-                    use_statistics: true,
-                    row_group_size: 128 * 1024 * 1024, // 128MB
                     compression: "snappy".to_string(),
-                    page_size: 1024 * 1024, // 1MB
-                    dictionary_page_size: 2 * 1024 * 1024, // 2MB
+                    schema_sample_size: 1000,
+                    max_sample_bytes: 1024 * 1024,
                 },
                 default: DefaultFormatConfig {
                     batch_size: 1024,
                     schema_sample_size: 1000,
+                    max_sample_bytes: 1024 * 1024,
                 },
             },
             plugins: PluginConfig {
-                plugin_dir: None,
-                enable_plugins: false,
+                directory: PathBuf::from("plugins"),
+                version_compatibility: VersionCompatibility::Minor,
+                isolated_loading: true,
+                max_instances: num_cpus,
                 plugin_configs: HashMap::new(),
-                load_timeout_secs: 30,
-                enable_hot_reload: false,
-                hot_reload_interval_secs: 60,
-                version_compatibility: VersionCompatibility::Major,
+                default_timeout: 30,
             },
             storage: StorageConfig {
                 s3: S3Config {
-                    region: "us-west-2".to_string(),
-                    bucket: "".to_string(),
-                    access_key_id: "".to_string(),
-                    secret_access_key: "".to_string(),
+                    region: "us-east-1".to_string(),
+                    endpoint: None,
+                    bucket: "default".to_string(),
                 },
-                read_buffer_size: 8 * 1024 * 1024, // 8MB
-                write_buffer_size: 8 * 1024 * 1024, // 8MB
-                max_concurrent_requests: 10,
+                local_path: PathBuf::from("data"),
                 retry: RetryConfig {
                     max_retries: 3,
                     initial_delay_ms: 100,
                     max_delay_ms: 5000,
-                    backoff_multiplier: 2.0,
                 },
             },
-            streaming: StreamingConfig {
-                max_buffer_memory: 256 * 1024 * 1024, // 256MB
-                buffer_pool_size: 32,
-                read_timeout_secs: 300,
-                write_timeout_secs: 300,
-                enable_backpressure: true,
-                max_in_flight_batches: 4,
-            },
             processing: ProcessingConfig {
-                max_memory_bytes: 1024 * 1024 * 1024, // 1GB
-                use_memory_mapping: true,
-                parallel_threads: num_cpus::get(),
+                num_threads: num_cpus,
+                memory_limit: 1024 * 1024 * 1024,
+            },
+            streaming: StreamingConfig {
+                max_concurrent_streams: num_cpus * 2,
+                buffer_size: 1024 * 1024,
+                timeout: 30,
+                use_compression: true,
             },
         }
     }
@@ -244,14 +218,14 @@ impl Default for Config {
 impl Config {
     /// Load configuration from a file
     pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
-        let contents = std::fs::read_to_string(path)?;
-        Ok(serde_yaml::from_str(&contents)?)
+        let content = std::fs::read_to_string(path)?;
+        Ok(serde_json::from_str(&content)?)
     }
 
     /// Save configuration to a file
     pub fn save_to_file<P: AsRef<std::path::Path>>(&self, path: P) -> anyhow::Result<()> {
-        let contents = serde_yaml::to_string(self)?;
-        std::fs::write(path, contents)?;
+        let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
         Ok(())
     }
 
@@ -292,7 +266,7 @@ impl FormatConfigTrait for ParquetConfig {
     }
 
     fn sample_size(&self) -> usize {
-        self.batch_size
+        self.schema_sample_size
     }
 }
 

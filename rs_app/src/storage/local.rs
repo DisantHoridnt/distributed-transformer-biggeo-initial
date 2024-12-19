@@ -1,54 +1,65 @@
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::Stream;
+use futures::{StreamExt, TryStreamExt};
 use object_store::local::LocalFileSystem;
-use object_store::{path::Path, ObjectStore};
-use std::path::PathBuf;
+use object_store::{ObjectStore, path::Path as ObjectPath};
 use tokio::fs;
-
-use super::Storage;
+use url::Url;
 
 pub struct LocalStorage {
     store: Box<dyn ObjectStore>,
-    base_path: PathBuf,
 }
 
 impl LocalStorage {
-    pub async fn new(base_path: PathBuf) -> Result<Self> {
-        fs::create_dir_all(&base_path).await?;
-        let store = LocalFileSystem::new_with_prefix(&base_path)?;
-        
+    pub fn new() -> Result<Self> {
+        let store = LocalFileSystem::new();
         Ok(Self {
             store: Box::new(store),
-            base_path,
         })
+    }
+
+    fn get_object_path(&self, url: &Url) -> Result<ObjectPath> {
+        let path = url.path();
+        Ok(ObjectPath::from(path))
     }
 }
 
 #[async_trait]
-impl Storage for LocalStorage {
+impl super::Storage for LocalStorage {
     async fn list(&self, prefix: Option<&str>) -> Result<Vec<String>> {
-        let prefix_path = prefix.map(Path::from);
-        let mut stream = self.store.list(prefix_path.as_ref());
-        
+        let prefix = prefix.unwrap_or("");
+        let path = ObjectPath::from(prefix);
         let mut entries = Vec::new();
-        while let Some(meta) = stream.next().await {
-            let meta = meta?;
-            entries.push(meta.location.to_string());
+        let mut stream = self.store.list(Some(&path));
+        while let Some(entry) = stream.next().await {
+            let entry = entry?;
+            entries.push(entry.location.to_string());
         }
-        
         Ok(entries)
     }
 
-    async fn get(&self, path: &str) -> Result<Bytes> {
-        let path = Path::from(path);
+    async fn read(&self, url: &Url) -> Result<Box<dyn Stream<Item = Result<Bytes, anyhow::Error>> + Send + Sync + Unpin + 'static>> {
+        let path = self.get_object_path(url)?;
+        let result = self.store.get(&path).await?;
+        let stream = futures::stream::once(async move { result.bytes().await })
+            .map_err(anyhow::Error::from)
+            .map_ok(|bytes| bytes);
+        Ok(Box::new(stream))
+    }
+
+    async fn read_all(&self, url: &Url) -> Result<Bytes> {
+        let path = self.get_object_path(url)?;
         let data = self.store.get(&path).await?.bytes().await?;
         Ok(data)
     }
 
-    async fn put(&self, path: &str, data: Bytes) -> Result<()> {
-        let path = Path::from(path);
+    async fn write(&self, url: &Url, data: Bytes) -> Result<()> {
+        let path = self.get_object_path(url)?;
         self.store.put(&path, data.into()).await?;
         Ok(())
     }
