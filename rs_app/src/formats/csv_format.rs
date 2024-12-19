@@ -1,18 +1,18 @@
 use anyhow::Result;
 use arrow::csv::{ReaderBuilder, WriterBuilder};
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
+use csv;
+use datafusion::dataframe::DataFrame;
+use datafusion::execution::context::SessionContext;
 use std::io::Cursor;
 use std::sync::Arc;
-
-use super::DataFormat;
 
 #[derive(Debug, Clone)]
 pub struct CsvConfig {
     pub has_header: bool,
     pub delimiter: u8,
-    pub batch_size: usize,
 }
 
 impl Default for CsvConfig {
@@ -20,21 +20,12 @@ impl Default for CsvConfig {
         Self {
             has_header: true,
             delimiter: b',',
-            batch_size: 1024,
         }
     }
 }
 
 pub struct CsvFormat {
     config: CsvConfig,
-}
-
-impl CsvFormat {
-    pub fn new(config: &CsvConfig) -> Self {
-        Self {
-            config: config.clone(),
-        }
-    }
 }
 
 impl Default for CsvFormat {
@@ -45,49 +36,84 @@ impl Default for CsvFormat {
     }
 }
 
-impl DataFormat for CsvFormat {
-    fn read_batch(&self, data: &Bytes) -> Result<RecordBatch> {
-        let cursor = Cursor::new(data);
-        let (schema, _) = arrow::csv::reader::infer_reader_schema(
-            cursor,
-            self.config.delimiter,
-            Some(self.config.batch_size),
-            self.config.has_header,
-        )?;
+impl CsvFormat {
+    pub fn new(config: CsvConfig) -> Self {
+        Self { config }
+    }
 
+    fn infer_schema(&self, data: &Bytes) -> Result<Arc<Schema>> {
         let cursor = Cursor::new(data);
-        let mut reader = ReaderBuilder::new(Arc::new(schema))
+        let mut reader = csv::Reader::from_reader(cursor);
+        let headers: Vec<String> = if self.config.has_header {
+            reader.headers()?.iter().map(|s| s.to_string()).collect()
+        } else {
+            (0..reader.headers()?.len())
+                .map(|i| format!("column_{}", i))
+                .collect()
+        };
+
+        let fields: Vec<Field> = headers
+            .into_iter()
+            .map(|name| Field::new(name, arrow::datatypes::DataType::Utf8, true))
+            .collect();
+
+        Ok(Arc::new(Schema::new(fields)))
+    }
+}
+
+impl super::DataFormat for CsvFormat {
+    fn read(&self, data: &Bytes) -> Result<DataFrame> {
+        let schema = self.infer_schema(data)?;
+        let cursor = Cursor::new(data);
+        let reader = ReaderBuilder::new(schema.clone())
             .has_header(self.config.has_header)
             .with_delimiter(self.config.delimiter)
-            .with_batch_size(self.config.batch_size)
             .build(cursor)?;
 
-        let batch = reader
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No data in CSV"))??;
-        Ok(batch)
+        let mut batches = Vec::new();
+        for result in reader {
+            batches.push(result?);
+        }
+        
+        let ctx = SessionContext::new();
+        let df = if !batches.is_empty() {
+            let df = ctx.read_batch(batches[0].clone())?;
+            for batch in batches.into_iter().skip(1) {
+                ctx.read_batch(batch)?;
+            }
+            df
+        } else {
+            ctx.read_batch(RecordBatch::new_empty(schema))?
+        };
+        Ok(df)
+    }
+
+    fn write(&self, df: &DataFrame) -> Result<Bytes> {
+        let mut buf = Vec::new();
+        let mut writer = WriterBuilder::new()
+            .has_headers(self.config.has_header)
+            .with_delimiter(self.config.delimiter)
+            .build(&mut buf);
+
+        let batches = futures::executor::block_on(df.clone().collect())?;
+        for batch in batches {
+            writer.write(&batch)?;
+        }
+        drop(writer);
+
+        Ok(Bytes::from(buf))
     }
 
     fn write_batch(&self, batch: &RecordBatch) -> Result<Bytes> {
-        let mut cursor = Cursor::new(Vec::new());
-        {
-            let mut writer = WriterBuilder::new()
-                .has_headers(self.config.has_header)
-                .with_delimiter(self.config.delimiter)
-                .build(&mut cursor);
-            writer.write(batch)?;
-        }
-        Ok(Bytes::from(cursor.into_inner()))
-    }
+        let mut buf = Vec::new();
+        let mut writer = WriterBuilder::new()
+            .has_headers(self.config.has_header)
+            .with_delimiter(self.config.delimiter)
+            .build(&mut buf);
 
-    fn infer_schema(&self, data: &Bytes) -> Result<SchemaRef> {
-        let cursor = Cursor::new(data);
-        let (schema, _) = arrow::csv::reader::infer_reader_schema(
-            cursor,
-            self.config.delimiter,
-            Some(self.config.batch_size),
-            self.config.has_header,
-        )?;
-        Ok(Arc::new(schema))
+        writer.write(batch)?;
+        drop(writer);
+
+        Ok(Bytes::from(buf))
     }
 }

@@ -1,28 +1,22 @@
 use anyhow::Result;
-use arrow::array::RecordBatchReader;
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
-use parquet::arrow::arrow_writer::ArrowWriter;
-use parquet::basic::Compression;
-use parquet::file::properties::WriterProperties;
-use std::io::Cursor;
+use datafusion::dataframe::DataFrame;
+use datafusion::execution::context::SessionContext;
+use parquet::arrow::ArrowWriter;
+use std::sync::Arc;
 
 use super::DataFormat;
 
 #[derive(Debug, Clone)]
 pub struct ParquetConfig {
-    pub compression: Compression,
-    pub batch_size: usize,
+    pub compression: Option<String>,
 }
 
 impl Default for ParquetConfig {
     fn default() -> Self {
-        Self {
-            compression: Compression::SNAPPY,
-            batch_size: 1024,
-        }
+        Self { compression: None }
     }
 }
 
@@ -31,10 +25,8 @@ pub struct ParquetFormat {
 }
 
 impl ParquetFormat {
-    pub fn new(config: &ParquetConfig) -> Self {
-        Self {
-            config: config.clone(),
-        }
+    pub fn new(config: ParquetConfig) -> Self {
+        Self { config }
     }
 }
 
@@ -47,34 +39,49 @@ impl Default for ParquetFormat {
 }
 
 impl DataFormat for ParquetFormat {
-    fn read_batch(&self, data: &Bytes) -> Result<RecordBatch> {
-        let mut reader = ParquetRecordBatchReader::try_new(data.clone(), self.config.batch_size)?;
-        let batch = reader
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No data in Parquet"))??;
-        Ok(batch)
+    fn read(&self, data: &Bytes) -> Result<DataFrame> {
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(data.clone(), 1024)?;
+        let mut batches = Vec::new();
+        for result in reader {
+            batches.push(result?);
+        }
+        
+        let ctx = SessionContext::new();
+        let df = if !batches.is_empty() {
+            let df = ctx.read_batch(batches[0].clone())?;
+            for batch in batches.into_iter().skip(1) {
+                ctx.read_batch(batch)?;
+            }
+            df
+        } else {
+            let schema = Schema::empty();
+            ctx.read_batch(RecordBatch::new_empty(Arc::new(schema)))?
+        };
+        Ok(df)
+    }
+
+    fn write(&self, df: &DataFrame) -> Result<Bytes> {
+        let mut buf = Vec::new();
+        let schema = Arc::new(Schema::try_from(df.schema())?);
+        let mut writer = ArrowWriter::try_new(&mut buf, schema, None)?;
+
+        let batches = futures::executor::block_on(df.clone().collect())?;
+        for batch in batches {
+            writer.write(&batch)?;
+        }
+        writer.close()?;
+
+        Ok(Bytes::from(buf))
     }
 
     fn write_batch(&self, batch: &RecordBatch) -> Result<Bytes> {
-        let mut cursor = Cursor::new(Vec::new());
-        {
-            let props = WriterProperties::builder()
-                .set_compression(self.config.compression)
-                .build();
+        let mut buf = Vec::new();
+        let schema = batch.schema();
+        let mut writer = ArrowWriter::try_new(&mut buf, schema, None)?;
 
-            let mut writer = ArrowWriter::try_new(
-                &mut cursor,
-                batch.schema(),
-                Some(props),
-            )?;
-            writer.write(batch)?;
-            writer.close()?;
-        }
-        Ok(Bytes::from(cursor.into_inner()))
-    }
+        writer.write(batch)?;
+        writer.close()?;
 
-    fn infer_schema(&self, data: &Bytes) -> Result<SchemaRef> {
-        let reader = ParquetRecordBatchReader::try_new(data.clone(), self.config.batch_size)?;
-        Ok(reader.schema().clone())
+        Ok(Bytes::from(buf))
     }
 }
