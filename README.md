@@ -176,11 +176,29 @@ The application implements a data processing pipeline that:
 ### Usage Example
 
 ```bash
-# Basic usage with SQL filter
+# Process weather data with SQL filter
 cargo run -- \
-  --input-url "s3://your-bucket/weather.parquet" \
-  --output-url "s3://your-bucket/filtered_weather.parquet" \
-  --sql-filter "SELECT * FROM data LIMIT 10"
+  --input-url s3://book-images-repo/input/weather.parquet \
+  --output-url s3://book-images-repo/output/weather_filtered.parquet \
+  --filter-sql "SELECT * FROM data LIMIT 10"
+```
+
+This command will:
+1. Read the weather data from the input S3 path
+2. Apply the SQL filter to limit to 10 rows
+3. Display the filtered data in a formatted table
+4. Write the results to the output S3 path
+
+Example output:
+```
+Applying SQL filter: SELECT * FROM data LIMIT 10
+
+Filtered data:
++---------+---------+----------+-------------+----------+-------------+---------------+------------+------------+--------------+--------------+-------------+-------------+-------------+-------------+----------+----------+---------+---------+-----------+---------+--------------+
+| MinTemp | MaxTemp | Rainfall | Evaporation | Sunshine | WindGustDir | WindGustSpeed | WindDir9am | WindDir3pm | WindSpeed9am | WindSpeed3pm | Humidity9am | Humidity3pm | Pressure9am | Pressure3pm | Cloud9am | Cloud3pm | Temp9am | Temp3pm | RainToday | RISK_MM | RainTomorrow |
++---------+---------+----------+-------------+----------+-------------+---------------+------------+------------+--------------+--------------+-------------+-------------+-------------+-------------+----------+----------+---------+---------+-----------+---------+--------------+
+| 8.0     | 24.3    | 0.0      | 3.4         | 6.3      | NW          | 30            | SW         | NW         | 6            | 20           | 68          | 29          | 1019.7      | 1015.0      | 7        | 7        | 14.4    | 23.6    | No        | 3.6     | Yes          |
+...
 ```
 
 ### Features
