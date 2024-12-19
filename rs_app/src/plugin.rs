@@ -1,110 +1,110 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
 use anyhow::Result;
-use async_trait::async_trait;
-use libloading::{Library, Symbol};
-use once_cell::sync::Lazy;
+use libloading::Library;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use tokio::fs;
 
 use crate::formats::DataFormat;
 
-/// Plugin metadata containing information about a format plugin
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginMetadata {
     pub name: String,
     pub version: String,
-    pub extensions: Vec<String>,
     pub description: String,
 }
 
-/// Trait that must be implemented by format plugins
-#[async_trait]
-pub trait FormatPlugin: Send + Sync {
-    /// Get metadata about the plugin
-    fn metadata(&self) -> &PluginMetadata;
-    
-    /// Create a new instance of the format
-    fn create_format(&self) -> Box<dyn DataFormat + Send + Sync>;
+pub struct Plugin {
+    pub metadata: PluginMetadata,
+    pub library: Arc<Library>,
 }
 
-type PluginRegistry = HashMap<String, Arc<dyn FormatPlugin>>;
+pub struct PluginRegistry {
+    plugins: HashMap<String, Arc<Plugin>>,
+    formats: HashMap<String, Arc<Box<dyn DataFormat + Send + Sync>>>,
+}
 
-/// Global plugin registry
-static PLUGIN_REGISTRY: Lazy<RwLock<PluginRegistry>> = Lazy::new(|| RwLock::new(HashMap::new()));
+impl PluginRegistry {
+    pub fn new() -> Self {
+        Self {
+            plugins: HashMap::new(),
+            formats: HashMap::new(),
+        }
+    }
 
-/// Plugin manager for loading and managing format plugins
+    pub async fn register_format(&mut self, name: &str, format: Arc<Box<dyn DataFormat + Send + Sync>>) -> Result<()> {
+        self.formats.insert(name.to_string(), format);
+        Ok(())
+    }
+
+    pub fn get_format(&self, name: &str) -> Option<Arc<Box<dyn DataFormat + Send + Sync>>> {
+        self.formats.get(name).cloned()
+    }
+
+    pub async fn load_plugin<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        let path = path.as_ref();
+        let lib = unsafe { Library::new(path)? };
+        
+        let get_metadata: libloading::Symbol<unsafe fn() -> PluginMetadata> =
+            unsafe { lib.get(b"get_metadata")? };
+        
+        let metadata = unsafe { get_metadata() };
+        let plugin = Arc::new(Plugin {
+            metadata: metadata.clone(),
+            library: Arc::new(lib),
+        });
+        
+        self.plugins.insert(metadata.name.clone(), plugin);
+        Ok(())
+    }
+}
+
 pub struct PluginManager {
+    registry: Arc<RwLock<PluginRegistry>>,
     plugin_dir: PathBuf,
-    loaded_libraries: Vec<Library>,
 }
 
 impl PluginManager {
     pub fn new<P: Into<PathBuf>>(plugin_dir: P) -> Self {
         Self {
+            registry: Arc::new(RwLock::new(PluginRegistry::new())),
             plugin_dir: plugin_dir.into(),
-            loaded_libraries: Vec::new(),
         }
     }
-    
-    /// Load all plugins from the plugin directory
-    pub fn load_plugins(&mut self) -> Result<()> {
-        let entries = std::fs::read_dir(&self.plugin_dir)?;
+
+    pub async fn load_plugins(&self) -> Result<()> {
+        let mut entries = fs::read_dir(&self.plugin_dir).await?;
         
-        for entry in entries {
-            let path = entry?.path();
-            if path.extension().map_or(false, |ext| {
-                ext == std::env::consts::DLL_EXTENSION
-            }) {
-                self.load_plugin(&path)?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "so" || ext == "dylib") {
+                let mut registry = self.registry.write();
+                registry.load_plugin(&path).await?;
             }
         }
         
         Ok(())
     }
-    
-    /// Load a single plugin from a dynamic library
-    fn load_plugin(&mut self, path: &std::path::Path) -> Result<()> {
-        unsafe {
-            let library = Library::new(path)?;
-            
-            // Get plugin creation function
-            let create_plugin: Symbol<unsafe extern "C" fn() -> *mut dyn FormatPlugin> = 
-                library.get(b"create_plugin")?;
-                
-            // Create plugin instance
-            let plugin = Arc::new(create_plugin());
-            
-            // Register plugin
-            let metadata = plugin.metadata();
-            PLUGIN_REGISTRY.write().insert(metadata.name.clone(), plugin);
-            
-            // Keep library loaded
-            self.loaded_libraries.push(library);
-        }
-        
-        Ok(())
+
+    pub async fn register_format(&self, name: &str, format: Arc<Box<dyn DataFormat + Send + Sync>>) -> Result<()> {
+        self.registry.write().register_format(name, format).await
     }
-    
-    /// Get a format plugin by name
-    pub fn get_plugin(name: &str) -> Option<Arc<dyn FormatPlugin>> {
-        PLUGIN_REGISTRY.read().get(name).cloned()
+
+    pub fn get_format(&self, name: &str) -> Option<Arc<Box<dyn DataFormat + Send + Sync>>> {
+        self.registry.read().get_format(name)
     }
+}
+
+/// Trait that must be implemented by format plugins
+pub trait FormatPlugin: Send + Sync {
+    /// Create a new instance of the format
+    fn create_format(&self) -> Box<dyn DataFormat + Send + Sync>;
     
-    /// Get a format plugin by file extension
-    pub fn get_plugin_for_extension(extension: &str) -> Option<Arc<dyn FormatPlugin>> {
-        PLUGIN_REGISTRY.read().values().find(|plugin| {
-            plugin.metadata().extensions.iter().any(|ext| ext == extension)
-        }).cloned()
-    }
-    
-    /// List all loaded plugins
-    pub fn list_plugins() -> Vec<PluginMetadata> {
-        PLUGIN_REGISTRY.read()
-            .values()
-            .map(|plugin| plugin.metadata().clone())
-            .collect()
-    }
+    /// Get metadata about the plugin
+    fn metadata(&self) -> &PluginMetadata;
 }
 
 /// Macro for plugin declaration

@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-distributed_transformer = { path = "../.." }
+distributed-transformer = { path = "../.." }
 async-trait = "0.1"
 anyhow = "1.0"
 arrow = { version = "47.0", features = ["prettyprint"] }

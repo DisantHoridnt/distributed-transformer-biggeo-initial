@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use num_cpus;
 
 /// Global configuration for the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +107,8 @@ pub enum VersionCompatibility {
 /// Storage system configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
+    /// S3 configuration
+    pub s3: S3Config,
     /// Buffer size for streaming reads
     pub read_buffer_size: usize,
     /// Buffer size for streaming writes
@@ -114,6 +117,19 @@ pub struct StorageConfig {
     pub max_concurrent_requests: usize,
     /// Retry configuration
     pub retry: RetryConfig,
+}
+
+/// S3 configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3Config {
+    /// Region
+    pub region: String,
+    /// Bucket
+    pub bucket: String,
+    /// Access key ID
+    pub access_key_id: String,
+    /// Secret access key
+    pub secret_access_key: String,
 }
 
 /// Retry configuration for storage operations
@@ -192,6 +208,12 @@ impl Default for Config {
                 version_compatibility: VersionCompatibility::Major,
             },
             storage: StorageConfig {
+                s3: S3Config {
+                    region: "us-west-2".to_string(),
+                    bucket: "".to_string(),
+                    access_key_id: "".to_string(),
+                    secret_access_key: "".to_string(),
+                },
                 read_buffer_size: 8 * 1024 * 1024, // 8MB
                 write_buffer_size: 8 * 1024 * 1024, // 8MB
                 max_concurrent_requests: 10,

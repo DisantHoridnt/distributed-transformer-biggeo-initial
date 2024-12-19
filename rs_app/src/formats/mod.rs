@@ -1,24 +1,26 @@
-use async_trait::async_trait;
-use arrow::record_batch::RecordBatch;
-use arrow::datatypes::SchemaRef;
-use futures::stream::BoxStream;
-use anyhow::Result;
-use bytes::Bytes;
+use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
-use object_store::GetResult;
+
+use anyhow::Result;
+use arrow::datatypes::{Schema, SchemaRef};
+use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
+use futures::Stream;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 
-mod parquet_format;
-mod csv_format;
-pub use parquet_format::ParquetFormat;
-pub use csv_format::CsvFormat;
+pub mod csv_format;
+pub mod parquet_format;
 
-/// Represents a stream of data chunks from storage
+pub use csv_format::CsvFormat;
+pub use parquet_format::ParquetFormat;
+
+pub type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + 'a>>;
 pub type DataStream = BoxStream<'static, Result<Bytes>>;
 
-#[async_trait]
-pub trait SchemaInference {
+#[async_trait::async_trait]
+pub trait SchemaInference: Send + Sync {
     /// Infer schema from a data sample
     async fn infer_schema(&self, data: &[u8]) -> Result<SchemaRef>;
     
@@ -35,7 +37,7 @@ pub trait SchemaInference {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait DataFormat: Send + Sync + SchemaInference {
     /// Read batches from a stream of bytes
     async fn read_batches_from_stream(
@@ -46,11 +48,11 @@ pub trait DataFormat: Send + Sync + SchemaInference {
 
     /// Read batches from a complete data buffer
     async fn read_batches(&self, data: Bytes) -> Result<BoxStream<'static, Result<RecordBatch>>> {
+        // First infer schema
+        let schema = self.infer_schema(&data).await?;
+        
         // Create a single-item stream from the data
         let stream = futures::stream::once(async move { Ok(data) });
-        
-        // Infer schema
-        let schema = self.infer_schema(&data).await?;
         
         // Use streaming implementation
         self.read_batches_from_stream(schema, Box::pin(stream)).await
@@ -58,44 +60,46 @@ pub trait DataFormat: Send + Sync + SchemaInference {
 
     /// Write batches to a byte buffer
     async fn write_batches(&self, batches: BoxStream<'static, Result<RecordBatch>>) -> Result<Bytes>;
-    
-    fn clone_box(&self) -> Box<dyn DataFormat + Send + Sync>;
 }
 
-// Format registry that combines built-in and plugin formats
-static FORMAT_REGISTRY: Lazy<RwLock<std::collections::HashMap<String, Box<dyn Fn() -> Box<dyn DataFormat + Send + Sync> + Send + Sync>>>> = 
-    Lazy::new(|| {
-        let mut m = std::collections::HashMap::new();
-        // Register built-in formats
-        m.insert("parquet".to_string(), Box::new(|| Box::new(ParquetFormat::default())));
-        m.insert("csv".to_string(), Box::new(|| Box::new(CsvFormat::new(true, 1024))));
-        RwLock::new(m)
-    });
-
-/// Get a format implementation by name
-pub fn get_format(name: &str) -> Option<Box<dyn DataFormat + Send + Sync>> {
-    FORMAT_REGISTRY.read().get(name).map(|factory| factory())
+pub struct FormatRegistry {
+    formats: HashMap<String, Arc<Box<dyn DataFormat + Send + Sync>>>,
 }
 
-/// Register a new format implementation
-pub fn register_format<F>(name: &str, factory: F)
-where
-    F: Fn() -> Box<dyn DataFormat + Send + Sync> + Send + Sync + 'static,
-{
-    FORMAT_REGISTRY.write().insert(name.to_string(), Box::new(factory));
+impl FormatRegistry {
+    pub fn new() -> Self {
+        let mut formats = HashMap::new();
+        formats.insert("csv".to_string(), Arc::new(Box::new(CsvFormat::default()) as Box<dyn DataFormat + Send + Sync>));
+        formats.insert("parquet".to_string(), Arc::new(Box::new(ParquetFormat::default()) as Box<dyn DataFormat + Send + Sync>));
+        Self { formats }
+    }
+
+    pub fn register_format(&mut self, name: &str, format: Box<dyn DataFormat + Send + Sync>) {
+        self.formats.insert(name.to_string(), Arc::new(format));
+    }
+
+    pub fn get_format(&self, name: &str) -> Option<Arc<Box<dyn DataFormat + Send + Sync>>> {
+        self.formats.get(name).cloned()
+    }
+}
+
+static FORMAT_REGISTRY: Lazy<RwLock<FormatRegistry>> = Lazy::new(|| {
+    RwLock::new(FormatRegistry::new())
+});
+
+pub fn register_format(name: &str, format: Box<dyn DataFormat + Send + Sync>) {
+    FORMAT_REGISTRY.write().register_format(name, format);
+}
+
+pub fn get_format(name: &str) -> Option<Arc<Box<dyn DataFormat + Send + Sync>>> {
+    FORMAT_REGISTRY.read().get_format(name)
 }
 
 /// Get a format implementation for a file extension
-pub fn get_format_for_extension(extension: &str) -> Option<Box<dyn DataFormat + Send + Sync>> {
-    // First check plugins
-    if let Some(plugin) = crate::plugin::PluginManager::get_plugin_for_extension(extension) {
-        return Some(plugin.create_format());
-    }
-    
-    // Then check built-in formats
+pub fn get_format_for_extension(extension: &str) -> Option<Arc<Box<dyn DataFormat + Send + Sync>>> {
     match extension {
-        "parquet" => Some(Box::new(ParquetFormat::default())),
-        "csv" => Some(Box::new(CsvFormat::new(true, 1024))),
+        "csv" => Some(Arc::new(Box::new(CsvFormat::default()) as Box<dyn DataFormat + Send + Sync>)),
+        "parquet" => Some(Arc::new(Box::new(ParquetFormat::default()) as Box<dyn DataFormat + Send + Sync>)),
         _ => None,
     }
 }

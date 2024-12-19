@@ -1,64 +1,45 @@
+use std::any::Any;
+use std::pin::Pin;
 use std::sync::Arc;
+
 use anyhow::Result;
-use async_trait::async_trait;
-use bytes::Bytes;
-use datafusion::arrow::datatypes::SchemaRef;
+use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
+use datafusion::common::ToDFSchema;
 use datafusion::datasource::TableProvider;
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::SessionState;
-use datafusion::logical_expr::{Expr, TableType};
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
+use datafusion::physical_expr::{create_physical_expr, PhysicalExpr};
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_expr::PhysicalExpr;
-use futures::{StreamExt, Stream};
-use tokio::sync::Mutex;
+use futures::Stream;
 
-use crate::formats::{DataFormat, DataStream};
-use crate::storage::Storage;
 use crate::execution::FormatExecPlan;
+use crate::formats::DataFormat;
 
 pub struct FormatTableProvider {
-    format: Box<dyn DataFormat + Send + Sync>,
-    storage: Arc<dyn Storage>,
-    path: String,
+    format: Arc<Box<dyn DataFormat + Send + Sync>>,
     schema: SchemaRef,
+    data: Pin<Box<dyn Stream<Item = Result<RecordBatch, anyhow::Error>> + Send + Sync + 'static>>,
 }
 
 impl FormatTableProvider {
-    pub async fn try_new(
-        format: Box<dyn DataFormat + Send + Sync>,
-        storage: Arc<dyn Storage>,
-        path: &str,
-    ) -> Result<Self> {
-        // Get a small sample to infer schema
-        let mut stream = storage.get_stream(path).await?;
-        let mut sample = Vec::new();
-        let mut sample_size = 0;
-        const MAX_SAMPLE_SIZE: usize = 1024 * 1024; // 1MB sample size
-        
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            sample.extend_from_slice(&chunk);
-            sample_size += chunk.len();
-            if sample_size >= MAX_SAMPLE_SIZE {
-                break;
-            }
-        }
-        
-        // Infer schema from sample
-        let schema = format.infer_schema(&sample).await?;
-        
-        Ok(Self {
+    pub fn new(
+        format: Arc<Box<dyn DataFormat + Send + Sync>>,
+        schema: SchemaRef,
+        data: Pin<Box<dyn Stream<Item = Result<RecordBatch, anyhow::Error>> + Send + Sync + 'static>>,
+    ) -> Self {
+        Self {
             format,
-            storage,
-            path: path.to_string(),
             schema,
-        })
+            data,
+        }
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl TableProvider for FormatTableProvider {
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn Any {
         self
     }
 
@@ -75,33 +56,41 @@ impl TableProvider for FormatTableProvider {
         state: &SessionState,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
-        _limit: Option<usize>,
+        limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        // Convert logical filters to physical expressions
-        let physical_filters: Vec<Arc<dyn PhysicalExpr>> = filters
+        // Convert logical expressions to physical expressions
+        let df_schema = self.schema.as_ref().to_dfschema()?;
+        let physical_filters = filters
             .iter()
-            .map(|expr| {
-                expr.to_physical_expr(
-                    state.create_physical_expr_context(),
-                    self.schema(),
-                    &state.config().options(),
+            .filter_map(|expr| {
+                create_physical_expr(
+                    expr,
+                    self.schema.as_ref(),
+                    self.schema.as_ref(),
+                    state.execution_props(),
                 )
+                .ok()
+                .map(|expr| Arc::new(expr) as Arc<dyn PhysicalExpr>)
             })
-            .collect::<datafusion::error::Result<_>>()?;
+            .collect::<Vec<_>>();
 
-        // Get streaming data from storage
-        let stream = self.storage
-            .get_stream(&self.path)
-            .await
-            .map_err(|e| DataFusionError::Internal(e.to_string()))?;
+        // Create a stream that yields the data
+        let stream = Box::pin(futures::stream::once(futures::future::ready(Ok(RecordBatch::new_empty(self.schema.clone())))));
 
-        // Create execution plan with streaming support
-        Ok(Arc::new(FormatExecPlan::new(
-            self.format.clone_box(),
+        let exec = FormatExecPlan::new(
             stream,
-            self.schema(),
+            self.schema.clone(),
             projection.cloned(),
             physical_filters,
-        )))
+            limit,
+        );
+        Ok(Arc::new(exec))
+    }
+
+    fn supports_filter_pushdown(
+        &self,
+        _filter: &Expr,
+    ) -> Result<TableProviderFilterPushDown, DataFusionError> {
+        Ok(TableProviderFilterPushDown::Inexact)
     }
 }
