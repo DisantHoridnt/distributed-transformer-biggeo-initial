@@ -16,6 +16,8 @@ impl S3Storage {
     pub fn new(bucket: String) -> Result<Self> {
         let store = AmazonS3Builder::new()
             .with_bucket_name(&bucket)
+            .with_allow_http(true)
+            .with_imdsv1_fallback()
             .build()?;
         Ok(Self {
             store: Box::new(store),

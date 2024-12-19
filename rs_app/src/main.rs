@@ -2,6 +2,7 @@ use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use clap::{Parser, Subcommand};
+use dotenv::dotenv;
 use futures::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -108,6 +109,7 @@ async fn convert(input: &str, output: &str) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenv().ok();
     let cli = Cli::parse();
 
     match cli.command {
