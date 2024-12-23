@@ -132,3 +132,6 @@ pub trait FormatPlugin: Send + Sync {
 - Configure buffer sizes for I/O
 - Set appropriate retry policies
 - Limit concurrent requests
+
+# Sample data files:
+[https://www.tablab.app/parquet/sample]
